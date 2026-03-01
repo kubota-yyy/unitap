@@ -16,6 +16,21 @@
 - **No external dependencies**: Python stdlib only (CLI), Newtonsoft.Json only (C#, bundled with Unity)
 - **Custom tool system**: Register your own tools via `[McpForUnityTool]` attribute
 
+## Why not MCP?
+
+MCP (Model Context Protocol) is the standard for connecting AI tools, but Unity Editor has unique constraints that make it a poor fit:
+
+| Challenge | MCP (stdio) | Unitap (direct TCP) |
+|-----------|-------------|---------------------|
+| **Domain Reload** | Server process dies, client gets EOF, manual restart needed | Heartbeat detects reload → CLI waits → auto-reconnects on new port |
+| **Editor frozen / compiling** | stdio blocks, client hangs indefinitely | File-based fallback reads `Editor.log` and `compile-errors.json` |
+| **Liveness detection** | No built-in mechanism | Heartbeat file updated every 0.8s; stale = editor is dead |
+| **Multiple editors** | One server per stdio pipe | Port auto-scan (6400-6409) discovers all running editors |
+| **Non-AI clients** | Requires MCP-compatible host | Any language with a TCP socket works |
+| **Extra process** | Needs a bridge process between AI host and Unity | CLI talks directly to Unity, nothing in between |
+
+Unitap is designed for **resilience in hostile conditions** — compilation pauses, domain reloads, and frozen editors are normal in Unity workflows. The heartbeat + fallback architecture keeps the CLI functional even when the editor is temporarily unreachable.
+
 ## Requirements
 
 - **Unity**: 2021.3 or later
