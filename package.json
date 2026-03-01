@@ -1,0 +1,26 @@
+{
+    "name": "com.nilone.unitap",
+    "version": "0.1.0",
+    "displayName": "Unitap",
+    "description": "Control Unity Editor via TCP from external tools. Zero-config TCP server with heartbeat, domain reload recovery, and Editor.log fallback.",
+    "unity": "2021.3",
+    "dependencies": {
+        "com.unity.nuget.newtonsoft-json": "3.0.0"
+    },
+    "keywords": [
+        "unity",
+        "editor",
+        "cli",
+        "tcp",
+        "automation"
+    ],
+    "author": {
+        "name": "NilOne",
+        "url": "https://github.com/nilone"
+    },
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/nilone/unitap.git"
+    }
+}
