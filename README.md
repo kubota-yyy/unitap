@@ -1,6 +1,11 @@
-# Unitap
+<p align="center">
+  <img src="banner.png" alt="Unitap" width="640">
+</p>
 
-Control Unity Editor via TCP from external tools. Unitap is a zero-config TCP server that runs inside the Unity Editor, paired with a Python CLI for automation.
+<p align="center">
+  Control Unity Editor via TCP from external tools.<br>
+  Zero-config TCP server + Python CLI for automation.
+</p>
 
 ## Features
 
