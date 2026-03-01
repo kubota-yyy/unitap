@@ -25,7 +25,7 @@ Add to your `Packages/manifest.json`:
 ```json
 {
     "dependencies": {
-        "com.nilone.unitap": "https://github.com/nilone/unitap.git#v0.1.0"
+        "com.nilone.unitap": "https://github.com/kubota-yyy/unitap.git#v0.1.0"
     }
 }
 ```
