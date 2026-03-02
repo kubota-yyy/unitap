@@ -40,6 +40,8 @@ namespace Unitap
             public string startedAtUtc;
             public int timeoutMs;
             public int consecutive;
+            public bool compileStarted;
+            public long? compileStartObservedAtMs;
             public JObject result;   // 完了時の結果
         }
 
@@ -56,6 +58,8 @@ namespace Unitap
                 startedAtUtc = DateTime.UtcNow.ToString("O"),
                 timeoutMs = timeoutMs,
                 consecutive = 0,
+                compileStarted = false,
+                compileStartObservedAtMs = null,
                 result = null
             };
             _lastPollTime = EditorApplication.timeSinceStartup;
@@ -163,6 +167,14 @@ namespace Unitap
                 return;
             }
 
+            var elapsedMs = (long)(DateTime.UtcNow - started).TotalMilliseconds;
+            bool isCompilingNow = EditorApplication.isCompiling || EditorApplication.isUpdating;
+            if (_current.command == "compile_check" && !_current.compileStarted && isCompilingNow)
+            {
+                _current.compileStarted = true;
+                _current.compileStartObservedAtMs = elapsedMs;
+            }
+
             // idle判定
             bool idle = !EditorApplication.isCompiling && !EditorApplication.isUpdating;
             if (idle)
@@ -205,7 +217,12 @@ namespace Unitap
 
             object result;
             if (_current.command == "compile_check")
-                result = BuildCompileCheckResult(elapsedMs, timedOut);
+                result = BuildCompileCheckResult(
+                    elapsedMs,
+                    timedOut,
+                    _current.compileStarted,
+                    _current.compileStartObservedAtMs
+                );
             else
             {
                 var isCompiling = EditorApplication.isCompiling;
@@ -233,7 +250,12 @@ namespace Unitap
             public string DedupKey => $"{file}:{line}:{column}:{code}";
         }
 
-        static object BuildCompileCheckResult(long elapsedMs, bool timedOut)
+        static object BuildCompileCheckResult(
+            long elapsedMs,
+            bool timedOut,
+            bool compileStarted,
+            long? compileStartObservedAtMs
+        )
         {
             var errors = new List<object>();
             var warnings = new List<object>();
@@ -287,6 +309,8 @@ namespace Unitap
             return new
             {
                 compiled = !timedOut,
+                compileStarted,
+                compileStartObservedAtMs,
                 hasErrors = errors.Count > 0,
                 errors, warnings,
                 errorCount = errors.Count,

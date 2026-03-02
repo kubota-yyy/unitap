@@ -27,6 +27,8 @@ namespace Unitap.Commands
                     warningCount = 0,
                     elapsedMs = 0L,
                     timedOut = false,
+                    compileStarted = false,
+                    compileStartObservedAtMs = (long?)null,
                     isPlaying = true
                 };
             }

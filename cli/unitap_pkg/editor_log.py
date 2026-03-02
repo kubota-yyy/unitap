@@ -380,6 +380,11 @@ def _fallback_compile_check(args, snapshot: dict) -> bool:
         return False
     is_compiling = waited_snapshot.get("isCompiling", False)
     is_updating = bool(is_compiling)
+    session_state = str(waited_snapshot.get("sessionState", "")).lower()
+    compile_started = bool(
+        is_compiling
+        or session_state in ("running", "success", "failed")
+    )
     errors = _format_error_list(waited_snapshot.get("errors", []))
     warnings = _format_error_list(waited_snapshot.get("warnings", []))
     result = {
@@ -387,6 +392,8 @@ def _fallback_compile_check(args, snapshot: dict) -> bool:
         "idle": (not is_compiling) and (not is_updating),
         "isCompiling": is_compiling,
         "isUpdating": is_updating,
+        "compileStarted": compile_started,
+        "compileStartObservedAtMs": 0 if compile_started else None,
         "hasErrors": len(errors) > 0,
         "errors": errors, "warnings": warnings,
         "errorCount": len(errors), "warningCount": len(warnings),

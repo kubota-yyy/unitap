@@ -68,7 +68,12 @@ def build_request(command: str, params: dict | None = None, timeout_ms: int = DE
     }
 
 
-def wait_for_connection(project_path: str | None, max_retries: int = CONNECTION_RETRY_MAX, require_tcp: bool = False) -> dict | None:
+def wait_for_connection(
+    project_path: str | None,
+    max_retries: int = CONNECTION_RETRY_MAX,
+    require_tcp: bool = False,
+    on_wait_retry=None,
+) -> dict | None:
     """heartbeat が fresh になるまで待機し、接続情報を返す。
     require_tcp=True の場合、TCP接続が確認できるまで待機する。"""
     ever_seen_heartbeat = False
@@ -79,6 +84,12 @@ def wait_for_connection(project_path: str | None, max_retries: int = CONNECTION_
         hb = find_heartbeat(project_path)
         if hb:
             ever_seen_heartbeat = True
+
+        if on_wait_retry:
+            try:
+                on_wait_retry(i, max_retries, hb)
+            except Exception:
+                pass
 
         if not hb or not check_heartbeat_fresh(hb):
             # heartbeat を一度も観測していない場合、Unity プロセスの存在を確認
@@ -363,6 +374,8 @@ def poll_async_job(host: str, port: int, command: str, params: dict, timeout_ms:
         "idle": not is_compiling and not is_updating,
         "isCompiling": is_compiling,
         "isUpdating": is_updating,
+        "compileStarted": bool(is_compiling or is_updating),
+        "compileStartObservedAtMs": None,
         "hasErrors": False,
         "errors": [],
         "warnings": [],

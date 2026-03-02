@@ -484,7 +484,7 @@ def do_capture_editor(args, port: int) -> None:
 
 def do_focus(args) -> None:
     project_root = find_project_root(args.project)
-    focused = focus_unity_editor(project_root)
+    focused = focus_unity_editor(project_root, log_failures=True)
     if focused:
         print_unitap_response(args, {"ok": True, "result": {"focused": True}})
         return
@@ -502,7 +502,60 @@ def do_wait_idle(args, port: int) -> None:
     timeout_val = args.timeout
     params = {"timeoutMs": timeout_val}
     resp = poll_async_job("127.0.0.1", port, "wait_idle", params, timeout_val, args.project)
-    print_unitap_response(args, resp)
+    if not resp.get("ok"):
+        print_unitap_response(args, resp)
+        return
+
+    result = dict(resp.get("result", {}))
+    auto_focus_attempted = False
+    auto_focus_succeeded = False
+    should_auto_focus = bool(getattr(args, "auto_focus_on_stall", False))
+    compile_stalled = bool(result.get("timedOut")) and (
+        bool(result.get("isCompiling")) or bool(result.get("isUpdating"))
+    )
+
+    if compile_stalled and should_auto_focus:
+        auto_focus_attempted = True
+        auto_focus_succeeded = _try_focus_for_compile(args, "wait_idle retry after timeout")
+        if auto_focus_succeeded:
+            reconnect_max_retries = max(3, int(timeout_val / 1000 / CONNECTION_RETRY_INTERVAL) + 3)
+            hb = wait_for_connection(
+                args.project,
+                max_retries=reconnect_max_retries,
+                require_tcp=True,
+            )
+            if hb and hb.get("port"):
+                retry_resp = poll_async_job(
+                    "127.0.0.1",
+                    int(hb["port"]),
+                    "wait_idle",
+                    params,
+                    timeout_val,
+                    args.project,
+                )
+                if not retry_resp.get("ok"):
+                    print_unitap_response(args, retry_resp)
+                    return
+                result = dict(retry_resp.get("result", {}))
+
+    result["autoFocusAttempted"] = auto_focus_attempted
+    result["autoFocusSucceeded"] = auto_focus_succeeded
+
+    if bool(result.get("timedOut")) and (bool(result.get("isCompiling")) or bool(result.get("isUpdating"))):
+        print_unitap_response(
+            args,
+            {
+                "ok": False,
+                "error": {
+                    "code": "compile_stalled_background",
+                    "message": "wait_idle timed out while Unity remained compiling in background.",
+                    "details": merge_wait_meta_into_result(args, result),
+                },
+            },
+        )
+        return
+
+    print_unitap_response(args, {"ok": True, "result": result})
 
 
 def _inspect_fsm_state(args, port: int, game_object: str, fsm_name: str, timeout_ms: int = 5000) -> dict:
@@ -722,6 +775,11 @@ def _normalize_compile_check_result(raw_result: dict, project_path: str | None) 
     is_compiling, is_updating = extract_wait_idle_state(result, project_path)
     result.setdefault("isCompiling", is_compiling)
     result.setdefault("isUpdating", is_updating)
+    result.setdefault(
+        "compileStarted",
+        bool(result.get("isCompiling")) or bool(result.get("isUpdating")),
+    )
+    result.setdefault("compileStartObservedAtMs", None)
     result.setdefault("idle", (not result["isCompiling"]) and (not result["isUpdating"]))
     result.setdefault("status", "completed")
     if "compiled" not in result:
@@ -734,7 +792,7 @@ def _normalize_compile_check_result(raw_result: dict, project_path: str | None) 
 
 def _try_focus_for_compile(args, reason: str) -> bool:
     project_root = find_project_root(args.project)
-    focused = focus_unity_editor(project_root)
+    focused = focus_unity_editor(project_root, log_failures=True)
     if focused:
         print(f"[unitap] Unity focused ({reason}).", file=sys.stderr)
         wait_ms = max(0, int(getattr(args, "focus_wait_ms", 350)))
@@ -746,11 +804,38 @@ def _try_focus_for_compile(args, reason: str) -> bool:
     return False
 
 
+def _compile_stall_reasons(result: dict) -> list[str]:
+    reasons: list[str] = []
+    if bool(result.get("timedOut")) and (bool(result.get("isCompiling")) or bool(result.get("isUpdating"))):
+        reasons.append("timed_out_while_compiling")
+    if result.get("compileStarted") is False:
+        reasons.append("compile_not_started")
+    return reasons
+
+
+def _attach_focus_meta(result: dict, attempted: bool, succeeded: bool) -> dict:
+    merged = dict(result or {})
+    merged["autoFocusAttempted"] = bool(attempted)
+    merged["autoFocusSucceeded"] = bool(succeeded)
+    return merged
+
+
 def do_compile_check(args, port: int) -> None:
     max_retries = max(0, getattr(args, "max_retries", 3))
+    auto_focus_on_stall = bool(getattr(args, "auto_focus_on_stall", False))
+    focus_attempted = False
+    focus_succeeded = False
+
+    def attempt_focus(reason: str) -> bool:
+        nonlocal focus_attempted, focus_succeeded
+        focus_attempted = True
+        focused = _try_focus_for_compile(args, reason)
+        if focused:
+            focus_succeeded = True
+        return focused
 
     if getattr(args, "focus_unity", False):
-        _try_focus_for_compile(args, "before compile_check")
+        attempt_focus("before compile_check")
 
     result: dict = {}
     for attempt in range(1 + max_retries):
@@ -767,27 +852,50 @@ def do_compile_check(args, port: int) -> None:
             return
 
         result = _normalize_compile_check_result(resp.get("result", {}), args.project)
+        stall_reasons = _compile_stall_reasons(result)
 
         # コンパイル完了 or エラーあり → 即返却
-        if not result.get("timedOut") or not result.get("isCompiling"):
+        if not stall_reasons:
             break
         if result.get("hasErrors") or result.get("errorCount", 0) > 0:
             break
 
-        # タイムアウト & compiling & エラーなし → リトライ
+        # stall 発生時のリトライ
         remaining = max_retries - attempt
         if remaining <= 0:
             break
 
-        # 初回リトライのみフォーカス（「非アクティブ時にコンパイルが進まない」環境向け）
-        if attempt == 0 and getattr(args, "focus_unity", False):
-            print("[unitap] compile_check timed out while compiling. Retrying after focus.", file=sys.stderr)
-            _try_focus_for_compile(args, "retry after timeout")
-        else:
-            print(
-                f"[unitap] compile_check still compiling, retrying ({attempt + 1}/{max_retries})...",
-                file=sys.stderr,
-            )
+        if auto_focus_on_stall:
+            if "compile_not_started" in stall_reasons:
+                attempt_focus("compile did not start; retrying with focus")
+            elif "timed_out_while_compiling" in stall_reasons:
+                attempt_focus("compile timed out while compiling; retrying with focus")
+
+        print(
+            f"[unitap] compile_check stalled ({','.join(stall_reasons)}), retrying ({attempt + 1}/{max_retries})...",
+            file=sys.stderr,
+        )
+
+    result = _attach_focus_meta(result, focus_attempted, focus_succeeded)
+    unresolved_stall_reasons = _compile_stall_reasons(result)
+    if unresolved_stall_reasons and not (result.get("hasErrors") or result.get("errorCount", 0) > 0):
+        code = "compile_stalled_background"
+        message = "compile_check timed out while Unity remained compiling in background."
+        if "compile_not_started" in unresolved_stall_reasons:
+            code = "compile_not_started"
+            message = "compile_check could not confirm script compilation start."
+        print_unitap_response(
+            args,
+            {
+                "ok": False,
+                "error": {
+                    "code": code,
+                    "message": message,
+                    "details": merge_wait_meta_into_result(args, result),
+                },
+            },
+        )
+        return
 
     print_unitap_response(args, {"ok": True, "result": result})
 

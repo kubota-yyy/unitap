@@ -13,7 +13,7 @@ from .editor_log import find_project_root, read_compile_errors, try_editor_log_f
 from .heartbeat import check_heartbeat_fresh, find_heartbeat
 from .project import ProjectResolutionError, resolve_project_root
 from .transport import wait_for_connection
-from .unity import is_unity_process_running
+from .unity import focus_unity_editor, is_unity_process_running
 from .commands import (
     do_capture,
     do_capture_editor,
@@ -64,6 +64,8 @@ def _append_wait_meta(
     started_at: float,
     recovered: bool,
     max_retries: int | None = None,
+    auto_focus_attempted: bool | None = None,
+    auto_focus_succeeded: bool | None = None,
 ) -> None:
     elapsed = max(0.0, time.time() - started_at)
     meta = getattr(args, "_wait_meta", None)
@@ -82,6 +84,10 @@ def _append_wait_meta(
     }
     if max_retries is not None:
         event["maxRetries"] = int(max_retries)
+    if auto_focus_attempted is not None:
+        event["autoFocusAttempted"] = bool(auto_focus_attempted)
+    if auto_focus_succeeded is not None:
+        event["autoFocusSucceeded"] = bool(auto_focus_succeeded)
     events.append(event)
 
     total = float(meta.get("waitReconnectSeconds", 0.0)) + elapsed
@@ -91,6 +97,14 @@ def _append_wait_meta(
     meta["waitReconnectReason"] = reason
     meta["waitReconnectRecovered"] = bool(recovered)
     meta["waitReconnectEventCount"] = len(events)
+    if auto_focus_attempted is not None:
+        meta["waitReconnectAutoFocusAttempted"] = bool(
+            meta.get("waitReconnectAutoFocusAttempted", False) or auto_focus_attempted
+        )
+    if auto_focus_succeeded is not None:
+        meta["waitReconnectAutoFocusSucceeded"] = bool(
+            meta.get("waitReconnectAutoFocusSucceeded", False) or auto_focus_succeeded
+        )
 
     setattr(args, "_wait_meta", meta)
 
@@ -130,6 +144,25 @@ def main():
 
     p_idle = subparsers.add_parser("wait_idle")
     p_idle.add_argument("--timeout", type=int, default=30000)
+    p_idle.set_defaults(auto_focus_on_stall=True)
+    p_idle.add_argument(
+        "--auto-focus-on-stall",
+        dest="auto_focus_on_stall",
+        action="store_true",
+        help="Try focusing Unity when wait_idle appears stalled (default: enabled)",
+    )
+    p_idle.add_argument(
+        "--no-auto-focus-on-stall",
+        dest="auto_focus_on_stall",
+        action="store_false",
+        help="Disable auto focus recovery for wait_idle stall handling",
+    )
+    p_idle.add_argument(
+        "--stall-focus-interval-ms",
+        type=int,
+        default=6000,
+        help="Minimum interval between focus attempts while waiting for reconnect (ms)",
+    )
 
     p_wait_fsm = subparsers.add_parser("wait_fsm", help="Wait until FSM reaches target state")
     p_wait_fsm.add_argument("--gameObject", required=True, help="Target GameObject path")
@@ -158,7 +191,7 @@ def main():
     p_compile.add_argument("--timeout", type=int, default=60000, help="Timeout in ms")
     p_compile.add_argument("--max-retries", type=int, default=3, dest="max_retries",
                            help="Max retries when timed out while still compiling (default: 3)")
-    p_compile.set_defaults(focus_unity=True)
+    p_compile.set_defaults(focus_unity=True, auto_focus_on_stall=True)
     p_compile.add_argument(
         "--focus-unity",
         dest="focus_unity",
@@ -176,6 +209,24 @@ def main():
         type=int,
         default=350,
         help="Wait after focusing Unity (ms)",
+    )
+    p_compile.add_argument(
+        "--auto-focus-on-stall",
+        dest="auto_focus_on_stall",
+        action="store_true",
+        help="Try focusing Unity when compile_check appears stalled (default: enabled)",
+    )
+    p_compile.add_argument(
+        "--no-auto-focus-on-stall",
+        dest="auto_focus_on_stall",
+        action="store_false",
+        help="Disable auto focus recovery for compile_check stall handling",
+    )
+    p_compile.add_argument(
+        "--stall-focus-interval-ms",
+        type=int,
+        default=6000,
+        help="Minimum interval between focus attempts while waiting for reconnect (ms)",
     )
 
     p_save = subparsers.add_parser("save_scene", help="Save current or all scenes")
@@ -277,6 +328,14 @@ def main():
             sys.exit(1)
         if args.poll_interval <= 0:
             print("Error: --poll-interval must be > 0", file=sys.stderr)
+            sys.exit(1)
+
+    if args.command in ("wait_idle", "compile_check"):
+        if args.timeout <= 0:
+            print("Error: --timeout must be > 0", file=sys.stderr)
+            sys.exit(1)
+        if args.stall_focus_interval_ms < 0:
+            print("Error: --stall-focus-interval-ms must be >= 0", file=sys.stderr)
             sys.exit(1)
 
     try:
@@ -383,14 +442,54 @@ def main():
                     max_retries = 10
             else:
                 max_retries = CONNECTION_RETRY_MAX
+            should_auto_focus = (
+                args.command in ("compile_check", "wait_idle")
+                and bool(getattr(args, "auto_focus_on_stall", False))
+            )
+            auto_focus_attempted = False
+            auto_focus_succeeded = False
+            focus_interval_ms = max(0, int(getattr(args, "stall_focus_interval_ms", 6000)))
+            last_focus_at = -1.0
+
+            def maybe_focus(reason: str, force: bool = False) -> None:
+                nonlocal auto_focus_attempted, auto_focus_succeeded, last_focus_at
+                if not should_auto_focus:
+                    return
+                now = time.monotonic()
+                if not force and focus_interval_ms > 0 and last_focus_at >= 0:
+                    elapsed_ms = (now - last_focus_at) * 1000.0
+                    if elapsed_ms < focus_interval_ms:
+                        return
+                last_focus_at = now
+                auto_focus_attempted = True
+                if focus_unity_editor(project_root, log_failures=True):
+                    auto_focus_succeeded = True
+                    print(f"[unitap] Unity focused ({reason}).", file=sys.stderr)
+
+            wait_retry_hook = None
+            if should_auto_focus:
+                maybe_focus(f"{state} reconnect pre-wait", force=True)
+
+                def wait_retry_hook(attempt_index: int, _max_retries: int, _heartbeat: dict | None) -> None:
+                    if attempt_index <= 0:
+                        return
+                    maybe_focus(f"{state} reconnect retry {attempt_index + 1}/{_max_retries}")
+
             reconnect_started_at = time.time()
-            heartbeat = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True)
+            heartbeat = wait_for_connection(
+                args.project,
+                max_retries=max_retries,
+                require_tcp=True,
+                on_wait_retry=wait_retry_hook,
+            )
             _append_wait_meta(
                 args,
                 reason=f"{state}_reconnect",
                 started_at=reconnect_started_at,
                 recovered=bool(heartbeat),
                 max_retries=max_retries,
+                auto_focus_attempted=auto_focus_attempted if should_auto_focus else None,
+                auto_focus_succeeded=auto_focus_succeeded if should_auto_focus else None,
             )
             if not heartbeat:
                 if try_editor_log_fallback(args, f"heartbeat is {state} and TCP is unavailable"):

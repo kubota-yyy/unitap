@@ -2,6 +2,7 @@ import os
 import platform
 import shlex
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -296,9 +297,65 @@ def kill_unity_processes(project_root: Path | None = None) -> list[int]:
     return sorted(set(terminated))
 
 
-def focus_unity_editor(project_root: Path | None = None) -> bool:
+def _run_osascript(script: str, timeout_seconds: float = 3.0) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "osascript timeout"
+    except OSError as ex:
+        return False, f"osascript execution failed: {ex}"
+
+    if result.returncode == 0:
+        return True, (result.stdout or "").strip()
+
+    detail = (result.stderr or result.stdout or "").strip()
+    if not detail:
+        detail = f"osascript exit code {result.returncode}"
+    return False, detail
+
+
+def _frontmost_process_pid() -> tuple[int | None, str | None]:
+    ok, out = _run_osascript(
+        'tell application "System Events" to get unix id of first application process whose frontmost is true'
+    )
+    if not ok:
+        return None, out
+    value = (out or "").strip()
+    if not value:
+        return None, "frontmost pid is empty"
+    try:
+        return int(value), None
+    except ValueError:
+        return None, f"frontmost pid parse failed: {value}"
+
+
+def _frontmost_process_name() -> tuple[str | None, str | None]:
+    ok, out = _run_osascript(
+        'tell application "System Events" to get name of first application process whose frontmost is true'
+    )
+    if not ok:
+        return None, out
+    name = (out or "").strip()
+    if not name:
+        return None, "frontmost process name is empty"
+    return name, None
+
+
+def focus_unity_editor(
+    project_root: Path | None = None,
+    *,
+    verify_frontmost: bool = True,
+    log_failures: bool = False,
+) -> bool:
     """Unity Editor を前面化する（macOSのみ）。"""
     if platform.system().lower() != "darwin":
+        if log_failures:
+            print("[unitap] Unity focus is not supported on this OS.", file=sys.stderr)
         return False
 
     target_pid = None
@@ -313,19 +370,44 @@ def focus_unity_editor(project_root: Path | None = None) -> bool:
         )
     scripts.append('tell application "Unity" to activate')
 
+    failure_reasons: list[str] = []
     for script in scripts:
-        try:
-            result = subprocess.run(
-                ["osascript", "-e", script],
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-        except (subprocess.TimeoutExpired, OSError):
+        ok, detail = _run_osascript(script)
+        if not ok:
+            failure_reasons.append(detail or "unknown AppleScript failure")
             continue
 
-        if result.returncode == 0:
+        if not verify_frontmost:
             time.sleep(0.2)
             return True
 
+        if target_pid is not None:
+            front_pid, err = _frontmost_process_pid()
+            if front_pid == target_pid:
+                time.sleep(0.2)
+                return True
+            if err:
+                failure_reasons.append(f"frontmost pid check failed: {err}")
+            else:
+                failure_reasons.append(
+                    f"frontmost pid mismatch (expected={target_pid}, actual={front_pid})"
+                )
+            continue
+
+        front_name, err = _frontmost_process_name()
+        if front_name and "unity" in front_name.lower():
+            time.sleep(0.2)
+            return True
+        if err:
+            failure_reasons.append(f"frontmost process check failed: {err}")
+        else:
+            failure_reasons.append(
+                f"frontmost process is not Unity (actual={front_name or 'unknown'})"
+            )
+
+    if log_failures:
+        if target_pid is None:
+            failure_reasons.insert(0, "Unity process not found for this project")
+        message = "; ".join(failure_reasons[-5:]) if failure_reasons else "unknown reason"
+        print(f"[unitap] Unity focus failed: {message}", file=sys.stderr)
     return False
