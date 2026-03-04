@@ -143,7 +143,7 @@ def send_with_retry(
     for attempt in range(3):  # 復帰後の再接続断に備えて最大3回リトライ
         try:
             return send_request(host, current_port, request, timeout_s)
-        except (ConnectionRefusedError, ConnectionError, ConnectionResetError) as e:
+        except (ConnectionRefusedError, ConnectionError, ConnectionResetError, TimeoutError) as e:
             if attempt == 0:
                 hb = find_heartbeat(project_path)
                 if not hb:
