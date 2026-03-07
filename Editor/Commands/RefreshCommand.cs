@@ -6,6 +6,7 @@ namespace Unitap.Commands
     {
         public object Execute(UnitapRequest request)
         {
+            AutoReloadExternalSceneChanges.TryReloadActiveSceneIfModifiedExternally("refresh");
             AssetDatabase.Refresh();
             return new { refreshed = true };
         }

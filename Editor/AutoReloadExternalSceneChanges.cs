@@ -34,37 +34,43 @@ namespace Unitap
 
         private static void OnUpdate()
         {
-            if (EditorApplication.isCompiling || EditorApplication.isUpdating) return;
+            TryReloadActiveSceneIfModifiedExternally("update");
+        }
+
+        public static bool TryReloadActiveSceneIfModifiedExternally(string trigger)
+        {
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating) return false;
 
             var scene = EditorSceneManager.GetActiveScene();
-            if (string.IsNullOrEmpty(scene.path)) return;
+            if (string.IsNullOrEmpty(scene.path)) return false;
+
+            var fullPath = Path.GetFullPath(scene.path);
+            if (!File.Exists(fullPath)) return false;
 
             if (_trackedScenePath != scene.path)
             {
                 _trackedScenePath = scene.path;
                 UpdateTimestamp(scene.path);
                 _ignoreNextChange = false;
-                return;
+                return false;
             }
 
-            var fullPath = Path.GetFullPath(scene.path);
-            if (!File.Exists(fullPath)) return;
-
             var currentTicks = File.GetLastWriteTimeUtc(fullPath).Ticks;
-            if (currentTicks == _lastWriteTicks) return;
+            if (currentTicks == _lastWriteTicks) return false;
 
             _lastWriteTicks = currentTicks;
 
             if (_ignoreNextChange)
             {
                 _ignoreNextChange = false;
-                return;
+                return false;
             }
 
             var scenePath = scene.path;
-            Debug.Log($"[AutoReload] Scene modified externally, reloading: {scenePath}");
-            EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
+            Debug.Log($"[AutoReload] Scene modified externally, reloading: {scenePath} (trigger: {trigger})");
             EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Single);
+            UpdateTimestamp(scenePath);
+            return true;
         }
 
         private static void UpdateTimestamp(string scenePath)

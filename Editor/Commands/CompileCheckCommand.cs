@@ -39,6 +39,9 @@ namespace Unitap.Commands
 
             var timeoutMs = request.Params?["timeoutMs"]?.ToObject<int>() ?? 60000;
 
+            // Refresh 直前に外部更新を同期吸収し、Unity 標準のリロード確認ダイアログを抑止する
+            AutoReloadExternalSceneChanges.TryReloadActiveSceneIfModifiedExternally("compile_check");
+
             // コンソールクリア + コンパイルエラーキャプチャクリア + コンパイルトリガー
             UnitapNativeConsole.Clear();
             UnitapEntry.Console?.Clear();
