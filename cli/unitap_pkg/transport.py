@@ -269,7 +269,14 @@ def poll_async_job(host: str, port: int, command: str, params: dict, timeout_ms:
         print("Play mode detected, stopping and retrying...", file=sys.stderr)
         try:
             stop_req = build_request("stop", {}, 10000, False)
-            send_request(host, current_port, stop_req, timeout_s=15)
+            send_with_retry(
+                host,
+                current_port,
+                stop_req,
+                timeout_s=15,
+                project_path=project_path,
+                exit_on_error=False,
+            )
         except Exception:
             pass
         hb = wait_for_connection(project_path, require_tcp=True)
@@ -278,7 +285,14 @@ def poll_async_job(host: str, port: int, command: str, params: dict, timeout_ms:
         current_port = hb["port"]
         # リトライ
         retry_req = build_request(command, params, request_timeout_ms, False)
-        resp = send_request(host, current_port, retry_req, timeout_s=request_timeout_s)
+        resp = send_with_retry(
+            host,
+            current_port,
+            retry_req,
+            timeout_s=request_timeout_s,
+            project_path=project_path,
+            exit_on_error=False,
+        )
         if not resp.get("ok"):
             return resp
         result = resp.get("result", {})
