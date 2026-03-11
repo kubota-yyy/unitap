@@ -134,6 +134,13 @@ namespace Unitap
             // コンパイルが既に完了していれば即座に完了判定
             if (!EditorApplication.isCompiling && !EditorApplication.isUpdating)
             {
+                if (_current.command == "compile_check" && !_current.compileStarted)
+                {
+                    // ドメインリロードまで到達していれば compile_check は開始済み。
+                    // Poll() が isCompiling を観測する前に reload されたケースを救済する。
+                    _current.compileStarted = true;
+                    _current.compileStartObservedAtMs ??= 0;
+                }
                 // ドメインリロード直後はidle確定なので即完了扱い
                 Complete();
                 return;

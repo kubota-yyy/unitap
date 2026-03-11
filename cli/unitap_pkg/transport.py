@@ -353,6 +353,10 @@ def poll_async_job(host: str, port: int, command: str, params: dict, timeout_ms:
             return resp
 
         poll_result = resp.get("result", {})
+        if poll_result.get("status") == "not_found" and command in ("wait_idle", "compile_check"):
+            # ドメインリロード直後は async-job 復元前に一時的に not_found が返ることがある。
+            # 即座に終端扱いすると compile_check が途中状態で抜けるため、期限までは再ポーリングする。
+            continue
         if poll_result.get("status") != "running":
             if command == "wait_idle":
                 wait_result = dict(poll_result)
@@ -379,23 +383,36 @@ def poll_async_job(host: str, port: int, command: str, params: dict, timeout_ms:
             },
         }
 
-    # compile_check のタイムアウト時: compile-errors.json からエラー情報をフォールバック取得
+    # compile_check のタイムアウト時: compile-errors.json / Editor.log から状態を補完する
     is_compiling, is_updating = extract_wait_idle_state({}, project_path)
+    snapshot = parse_editor_log_snapshot(project_path)
+    session_state = str(snapshot.get("sessionState", "")).lower() if snapshot else ""
+    compile_started = bool(
+        is_compiling
+        or is_updating
+        or session_state in ("running", "success", "failed")
+    )
+    compile_finished = bool(
+        session_state in ("success", "failed")
+        and not is_compiling
+        and not is_updating
+    )
     fallback_result = {
         "status": "completed",
-        "timedOut": True,
-        "compiled": False,
+        "timedOut": not compile_finished,
+        "compiled": compile_finished,
         "idle": not is_compiling and not is_updating,
         "isCompiling": is_compiling,
         "isUpdating": is_updating,
-        "compileStarted": bool(is_compiling or is_updating),
-        "compileStartObservedAtMs": None,
+        "compileStarted": compile_started,
+        "compileStartObservedAtMs": 0 if compile_started else None,
         "hasErrors": False,
         "errors": [],
         "warnings": [],
         "errorCount": 0,
         "warningCount": 0,
         "elapsedMs": elapsed_ms,
+        "source": "editor_log (async job timed out)" if snapshot else "async-job poll timeout",
     }
     compile_errors = read_compile_errors(project_path)
     if compile_errors:
@@ -403,7 +420,7 @@ def poll_async_job(host: str, port: int, command: str, params: dict, timeout_ms:
         warning_entries = [e for e in compile_errors if e.get("level") == "warning"]
         if error_entries:
             fallback_result["hasErrors"] = True
-            fallback_result["compiled"] = not is_compiling and not is_updating
+            fallback_result["compiled"] = compile_finished or (not is_compiling and not is_updating)
             fallback_result["errorCount"] = len(error_entries)
             fallback_result["warningCount"] = len(warning_entries)
             fallback_result["errors"] = [{"message": e.get("message", ""), "file": e.get("file", ""), "line": e.get("line", 0)} for e in error_entries]
