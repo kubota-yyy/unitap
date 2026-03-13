@@ -1,11 +1,9 @@
-import contextlib
 import json
-import os
 import sys
 import time
-from pathlib import Path
 
 from .constants import CONNECTION_RETRY_INTERVAL, DEFAULT_TIMEOUT_MS
+from .editor_lock import enrich_diagnose_result_with_editor_lock
 from .editor_log import find_project_root, read_compile_errors
 from .heartbeat import find_heartbeat, check_heartbeat_fresh
 from .image_quality import inspect_capture_image
@@ -76,42 +74,6 @@ def merge_wait_meta_into_result(args, result):
     return merged
 
 
-@contextlib.contextmanager
-def _launch_lock(project_root: Path, timeout_s: float = 30.0):
-    lock_dir = project_root / "Library" / "Unitap"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / ".launch.lock"
-
-    with lock_path.open("a+") as lock_file:
-        if os.name == "nt":
-            yield
-            return
-
-        try:
-            import fcntl
-        except ImportError:
-            yield
-            return
-
-        deadline = time.time() + max(timeout_s, 1.0)
-        while True:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                if time.time() >= deadline:
-                    raise TimeoutError("Another unitap launch operation is already in progress.")
-                time.sleep(0.2)
-
-        try:
-            yield
-        finally:
-            try:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            except OSError:
-                pass
-
-
 def _format_processes(processes: list[dict], limit: int = 5) -> list[dict]:
     output: list[dict] = []
     for item in processes[:limit]:
@@ -149,155 +111,146 @@ def do_launch(args) -> None:
         }, indent=2))
         sys.exit(1)
 
-    try:
-        with _launch_lock(project_root):
-            if args.restart and args.no_kill:
-                print(json.dumps({
-                    "ok": False,
-                    "error": "--restart and --no-kill cannot be used together.",
-                    "projectPath": str(project_root),
-                }, indent=2))
-                sys.exit(1)
-
-            running_same_project = list_unity_processes(project_root)
-            running_any = list_unity_processes()
-
-            if running_same_project and not args.restart:
-                hb = find_heartbeat(args.project)
-                connected = bool(hb and hb.get("port") and check_heartbeat_fresh(hb))
-                if not connected and not args.no_wait:
-                    timeout_s = args.wait_timeout
-                    max_retries = max(timeout_s // CONNECTION_RETRY_INTERVAL, 1)
-                    hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True)
-                    connected = bool(hb)
-
-                payload = {
-                    "ok": True,
-                    "launched": False,
-                    "alreadyRunning": True,
-                    "connected": connected,
-                    "version": version,
-                    "projectPath": str(project_root),
-                    "message": "Unity is already running for this project. Skipped launch to prevent multi-instance startup.",
-                    "runningProcesses": _format_processes(running_same_project),
-                }
-                if hb and hb.get("port"):
-                    payload["port"] = hb.get("port")
-                print(json.dumps(payload, indent=2))
-                return
-
-            if running_any and not args.restart:
-                print(json.dumps({
-                    "ok": False,
-                    "error": "Another Unity instance is already running. Launch aborted to prevent multiple Unity instances.",
-                    "projectPath": str(project_root),
-                    "runningProcesses": _format_processes(running_any),
-                }, indent=2))
-                sys.exit(1)
-
-            if args.no_kill and running_any:
-                print(json.dumps({
-                    "ok": False,
-                    "error": "--no-kill cannot be used while a Unity process is already running.",
-                    "projectPath": str(project_root),
-                    "runningProcesses": _format_processes(running_any),
-                }, indent=2))
-                sys.exit(1)
-
-            # 3. バックアップ削除（Recovery Scene Backups ダイアログ防止）
-            removed = clean_recovery_files(project_root)
-
-            # 4. 既存プロセスを kill
-            kill_target_project = project_root if args.kill_project_only else None
-            if not args.no_kill:
-                killed = kill_unity_processes(kill_target_project)
-                if killed:
-                    print(f"Killed Unity processes: {killed}", file=sys.stderr)
-                    time.sleep(2)
-                if is_unity_process_running():
-                    print(json.dumps({
-                        "ok": False,
-                        "error": "Failed to terminate existing Unity process. Launch aborted to avoid multiple Unity instances.",
-                        "projectPath": str(project_root),
-                        "runningProcesses": _format_processes(list_unity_processes()),
-                    }, indent=2))
-                    sys.exit(1)
-
-            # 5. kill 後にも再掃除（ロック解放後に残るバックアップ対策）
-            for p in clean_recovery_files(project_root):
-                if p not in removed:
-                    removed.append(p)
-            if removed:
-                print(f"Cleaned recovery files: {', '.join(removed)}", file=sys.stderr)
-
-            # 6. 古い heartbeat を削除
-            old_hb_path = project_root / "Library" / "Unitap" / ".heartbeat.json"
-            if old_hb_path.exists():
-                try:
-                    old_hb_path.unlink()
-                except OSError:
-                    pass
-
-            # 7. Unity 起動
-            # Restart flows should ignore compile-error dialogs to prevent headless deadlocks.
-            ignore_compiler_errors = bool(args.restart or getattr(args, "ignore_compiler_errors", False))
-            cmd = build_unity_launch_command(
-                editor_path,
-                project_root,
-                ignore_compiler_errors=ignore_compiler_errors,
-            )
-            print(f"Launching Unity {version}...", file=sys.stderr)
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-
-            # 8. 起動確認待ち
-            if args.no_wait:
-                print(json.dumps({
-                    "ok": True,
-                    "launched": True,
-                    "version": version,
-                    "projectPath": str(project_root),
-                }, indent=2))
-                return
-
-            timeout_s = args.wait_timeout
-            print(f"Waiting for Unity to start (timeout: {timeout_s}s)...", file=sys.stderr)
-            max_retries = max(timeout_s // CONNECTION_RETRY_INTERVAL, 1)
-            hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True)
-
-            if hb:
-                print(json.dumps({
-                    "ok": True,
-                    "launched": True,
-                    "connected": True,
-                    "version": version,
-                    "projectPath": str(project_root),
-                    "port": hb.get("port"),
-                }, indent=2))
-            else:
-                # プロセスが存在するかだけ確認
-                process_running = is_unity_process_running(project_root)
-
-                print(json.dumps({
-                    "ok": True,
-                    "launched": True,
-                    "connected": False,
-                    "version": version,
-                    "projectPath": str(project_root),
-                    "processRunning": process_running,
-                    "message": "Unity is starting but Unitap is not yet connected. It may still be loading.",
-                }, indent=2))
-    except TimeoutError as ex:
+    if args.restart and args.no_kill:
         print(json.dumps({
             "ok": False,
-            "error": str(ex),
+            "error": "--restart and --no-kill cannot be used together.",
             "projectPath": str(project_root),
         }, indent=2))
         sys.exit(1)
+
+    running_same_project = list_unity_processes(project_root)
+    running_any = list_unity_processes()
+
+    if running_same_project and not args.restart:
+        hb = find_heartbeat(args.project)
+        connected = bool(hb and hb.get("port") and check_heartbeat_fresh(hb))
+        if not connected and not args.no_wait:
+            timeout_s = args.wait_timeout
+            max_retries = max(timeout_s // CONNECTION_RETRY_INTERVAL, 1)
+            hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True)
+            connected = bool(hb)
+
+        payload = {
+            "ok": True,
+            "launched": False,
+            "alreadyRunning": True,
+            "connected": connected,
+            "version": version,
+            "projectPath": str(project_root),
+            "message": "Unity is already running for this project. Skipped launch to prevent multi-instance startup.",
+            "runningProcesses": _format_processes(running_same_project),
+        }
+        if hb and hb.get("port"):
+            payload["port"] = hb.get("port")
+        print(json.dumps(payload, indent=2))
+        return
+
+    if running_any and not args.restart:
+        print(json.dumps({
+            "ok": False,
+            "error": "Another Unity instance is already running. Launch aborted to prevent multiple Unity instances.",
+            "projectPath": str(project_root),
+            "runningProcesses": _format_processes(running_any),
+        }, indent=2))
+        sys.exit(1)
+
+    if args.no_kill and running_any:
+        print(json.dumps({
+            "ok": False,
+            "error": "--no-kill cannot be used while a Unity process is already running.",
+            "projectPath": str(project_root),
+            "runningProcesses": _format_processes(running_any),
+        }, indent=2))
+        sys.exit(1)
+
+    # 3. バックアップ削除（Recovery Scene Backups ダイアログ防止）
+    removed = clean_recovery_files(project_root)
+
+    # 4. 既存プロセスを kill
+    kill_target_project = project_root if args.kill_project_only else None
+    if not args.no_kill:
+        killed = kill_unity_processes(kill_target_project)
+        if killed:
+            print(f"Killed Unity processes: {killed}", file=sys.stderr)
+            time.sleep(2)
+        if is_unity_process_running():
+            print(json.dumps({
+                "ok": False,
+                "error": "Failed to terminate existing Unity process. Launch aborted to avoid multiple Unity instances.",
+                "projectPath": str(project_root),
+                "runningProcesses": _format_processes(list_unity_processes()),
+            }, indent=2))
+            sys.exit(1)
+
+    # 5. kill 後にも再掃除（ロック解放後に残るバックアップ対策）
+    for p in clean_recovery_files(project_root):
+        if p not in removed:
+            removed.append(p)
+    if removed:
+        print(f"Cleaned recovery files: {', '.join(removed)}", file=sys.stderr)
+
+    # 6. 古い heartbeat を削除
+    old_hb_path = project_root / "Library" / "Unitap" / ".heartbeat.json"
+    if old_hb_path.exists():
+        try:
+            old_hb_path.unlink()
+        except OSError:
+            pass
+
+    # 7. Unity 起動
+    # Restart flows should ignore compile-error dialogs to prevent headless deadlocks.
+    ignore_compiler_errors = bool(args.restart or getattr(args, "ignore_compiler_errors", False))
+    cmd = build_unity_launch_command(
+        editor_path,
+        project_root,
+        ignore_compiler_errors=ignore_compiler_errors,
+    )
+    print(f"Launching Unity {version}...", file=sys.stderr)
+    subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+    # 8. 起動確認待ち
+    if args.no_wait:
+        print(json.dumps({
+            "ok": True,
+            "launched": True,
+            "version": version,
+            "projectPath": str(project_root),
+        }, indent=2))
+        return
+
+    timeout_s = args.wait_timeout
+    print(f"Waiting for Unity to start (timeout: {timeout_s}s)...", file=sys.stderr)
+    max_retries = max(timeout_s // CONNECTION_RETRY_INTERVAL, 1)
+    hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True)
+
+    if hb:
+        print(json.dumps({
+            "ok": True,
+            "launched": True,
+            "connected": True,
+            "version": version,
+            "projectPath": str(project_root),
+            "port": hb.get("port"),
+        }, indent=2))
+    else:
+        # プロセスが存在するかだけ確認
+        process_running = is_unity_process_running(project_root)
+
+        print(json.dumps({
+            "ok": True,
+            "launched": True,
+            "connected": False,
+            "version": version,
+            "projectPath": str(project_root),
+            "processRunning": process_running,
+            "message": "Unity is starting but Unitap is not yet connected. It may still be loading.",
+        }, indent=2))
 
 
 def do_capture(args, port: int) -> None:
@@ -947,15 +900,8 @@ def do_sync_command(args, port: int) -> None:
     if isinstance(resp, dict) and resp.get("ok"):
         result = resp.get("result", {})
         if isinstance(result, dict):
+            if args.command == "diagnose":
+                project_root = find_project_root(args.project)
+                result = enrich_diagnose_result_with_editor_lock(project_root, result)
             resp["result"] = merge_wait_meta_into_result(args, result)
-
-    if args.json:
-        print(json.dumps(resp, indent=2, ensure_ascii=False))
-    else:
-        if resp.get("ok"):
-            result = resp.get("result", {})
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-        else:
-            err = resp.get("error", {})
-            print(f"Error [{err.get('code', 'unknown')}]: {err.get('message', 'unknown error')}", file=sys.stderr)
-            sys.exit(1)
+    print_unitap_response(args, resp)

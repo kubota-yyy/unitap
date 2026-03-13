@@ -62,6 +62,14 @@ Add to your `Packages/manifest.json`:
 
 ## CLI Usage
 
+Global options must appear before the subcommand:
+
+```bash
+python3 cli/unitap.py --wait-lock --lock-timeout 900 compile_check --timeout 60000
+```
+
+Exclusive commands keep a project-scoped lock under `Library/Unitap/.editor-op.lock`. If another long-running or destructive operation is already using Unitap, the default behavior is to fail fast with `Error [editor_busy]`. Add `--wait-lock` when you want the caller to queue behind the current lock holder instead of failing immediately.
+
 ```bash
 # Check editor status
 python3 cli/unitap.py status
@@ -75,6 +83,7 @@ python3 cli/unitap.py execute_menu --menuPath "Assets/Refresh"
 
 # Compile check (clear -> refresh -> wait -> extract errors)
 python3 cli/unitap.py compile_check --timeout 60000
+python3 cli/unitap.py --wait-lock compile_check --timeout 60000
 
 # Console
 python3 cli/unitap.py read_console --type error
@@ -91,6 +100,8 @@ python3 cli/unitap.py launch --restart
 python3 cli/unitap.py tool_list
 python3 cli/unitap.py tool_exec --tool find_assets --params '{"query": "Panel", "type": "Prefab"}'
 ```
+
+For long-running test flows, prefer wrapper commands such as `run_automate_test --wait`, `run_automate_batch`, and `run_playmode_test --wait` instead of raw `tool_exec --tool run_automate_test` / `run_playmode_test`. The wrapper commands hold the CLI lock for the full wait lifecycle, which prevents other clients from injecting `clear`, `stop`, or a second test start midway through the run.
 
 ## Custom Tools
 

@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import json
 import sys
 import time
@@ -10,6 +11,12 @@ from .constants import (
     LIVENESS_RECONNECT_RETRY_MAX,
 )
 from .editor_log import find_project_root, read_compile_errors, try_editor_log_fallback
+from .editor_lock import (
+    EditorOperationBusyError,
+    build_editor_lock_metadata,
+    command_requires_editor_lock,
+    editor_operation_lock,
+)
 from .heartbeat import check_heartbeat_fresh, find_heartbeat
 from .project import ProjectResolutionError, resolve_project_root
 from .transport import wait_for_connection
@@ -113,6 +120,17 @@ def main():
     parser = argparse.ArgumentParser(description="Unitap - Unity Editor control CLI")
     parser.add_argument("--project", help="Unity project path", default=None)
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
+    parser.add_argument(
+        "--wait-lock",
+        action="store_true",
+        help="Wait for the project-scoped editor operation lock before running exclusive commands",
+    )
+    parser.add_argument(
+        "--lock-timeout",
+        type=float,
+        default=1800.0,
+        help="Maximum seconds to wait when --wait-lock is specified",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -337,6 +355,9 @@ def main():
         if args.stall_focus_interval_ms < 0:
             print("Error: --stall-focus-interval-ms must be >= 0", file=sys.stderr)
             sys.exit(1)
+    if args.lock_timeout <= 0:
+        print("Error: --lock-timeout must be > 0", file=sys.stderr)
+        sys.exit(1)
 
     try:
         resolved_project = resolve_project_root(args.project, allow_process_discovery=True)
@@ -347,9 +368,32 @@ def main():
     if resolved_project:
         args.project = str(resolved_project)
 
+    lock_context = contextlib.nullcontext()
+    if command_requires_editor_lock(args):
+        if resolved_project is None:
+            _print_cli_error(
+                args,
+                "project_not_found",
+                "Unity project not found for editor operation lock.",
+                {"command": args.command},
+            )
+            sys.exit(1)
+        metadata = build_editor_lock_metadata(args, resolved_project)
+        lock_context = editor_operation_lock(
+            resolved_project,
+            metadata,
+            wait=bool(args.wait_lock),
+            timeout_s=float(args.lock_timeout),
+        )
+
     # Commands that don't need heartbeat
     if args.command == "launch":
-        dispatch_table["launch"](args, None)
+        try:
+            with lock_context:
+                dispatch_table["launch"](args, None)
+        except EditorOperationBusyError as ex:
+            _print_cli_error(args, ex.code, ex.message, ex.details)
+            sys.exit(1)
         return
 
     if args.command == "focus":
@@ -524,9 +568,19 @@ def main():
     # --- Command dispatch ---
     handler = dispatch_table.get(args.command)
     if handler:
-        handler(args, port)
+        try:
+            with lock_context:
+                handler(args, port)
+        except EditorOperationBusyError as ex:
+            _print_cli_error(args, ex.code, ex.message, ex.details)
+            sys.exit(1)
         return
 
     # Fallback: sync command (extensions can override via _sync_command key)
     sync_handler = dispatch_table.get("_sync_command", do_sync_command)
-    sync_handler(args, port)
+    try:
+        with lock_context:
+            sync_handler(args, port)
+    except EditorOperationBusyError as ex:
+        _print_cli_error(args, ex.code, ex.message, ex.details)
+        sys.exit(1)
