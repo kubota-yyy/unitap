@@ -16,6 +16,7 @@ from .constants import (
     SCRIPT_COMPILATION_START_PATTERN,
 )
 from .project import ProjectResolutionError, resolve_project_root
+from .unity import list_unity_processes
 
 
 def find_project_root(project_path: str | None = None) -> Path | None:
@@ -461,6 +462,15 @@ def _snapshot_matches_project(snapshot: dict, project_root: Path | None) -> bool
             if _is_same_path(path, normalized_root):
                 return True
         return False
+
+    running_for_project = list_unity_processes(project_root)
+    if len(running_for_project) == 1:
+        running_any = list_unity_processes()
+        if len(running_any) == 1 and _is_same_path(
+            running_any[0].get("projectPath"),
+            normalized_root,
+        ):
+            return True
 
     # 判定不能なグローバルログは採用しない（誤判定防止を優先）
     return False

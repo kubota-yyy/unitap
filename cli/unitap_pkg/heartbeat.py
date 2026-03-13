@@ -68,7 +68,10 @@ def _load_heartbeat_json(path: Path) -> dict | None:
         try:
             raw = path.read_text()
         except OSError:
-            return None
+            if attempt + 1 >= HEARTBEAT_READ_RETRY_COUNT or not path.exists():
+                return None
+            time.sleep(HEARTBEAT_READ_RETRY_INTERVAL)
+            continue
 
         try:
             data = json.loads(raw)
@@ -122,5 +125,4 @@ def check_heartbeat_fresh(heartbeat: dict) -> bool:
         return age < threshold
 
     return False
-
 
