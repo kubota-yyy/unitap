@@ -122,8 +122,9 @@ def main():
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
     parser.add_argument(
         "--wait-lock",
-        action="store_true",
-        help="Wait for the project-scoped editor operation lock before running exclusive commands",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Wait for the editor operation lock (default: enabled; use --no-wait-lock to fail immediately)",
     )
     parser.add_argument(
         "--lock-timeout",
@@ -206,7 +207,7 @@ def main():
     p_exec.add_argument("--params", default="{}", help="JSON params")
 
     p_compile = subparsers.add_parser("compile_check", help="Compile and check for errors")
-    p_compile.add_argument("--timeout", type=int, default=60000, help="Timeout in ms")
+    p_compile.add_argument("--timeout", type=int, default=90000, help="Timeout in ms")
     p_compile.add_argument("--max-retries", type=int, default=3, dest="max_retries",
                            help="Max retries when timed out while still compiling (default: 3)")
     p_compile.set_defaults(focus_unity=True, auto_focus_on_stall=True)
