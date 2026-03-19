@@ -39,7 +39,13 @@ namespace Unitap
 
         static UnitapCompileErrorCapture()
         {
+            CompilationPipeline.compilationStarted += OnCompilationStarted;
             CompilationPipeline.assemblyCompilationFinished += OnAssemblyCompilationFinished;
+        }
+
+        static void OnCompilationStarted(object _)
+        {
+            Clear();
         }
 
         static void OnAssemblyCompilationFinished(string assemblyPath, CompilerMessage[] messages)
@@ -80,7 +86,9 @@ namespace Unitap
         {
             var data = Load();
             if (data == null) return new List<CompileEntry>();
-            return data.entries.Select(e => new CompileEntry
+            return data.entries
+                .Where(e => !IsStale(e))
+                .Select(e => new CompileEntry
             {
                 File = e.file,
                 Line = e.line,
@@ -100,7 +108,7 @@ namespace Unitap
             {
                 var data = Load();
                 if (data == null) return 0;
-                return data.entries.Count(e => e.level == "error");
+                return data.entries.Count(e => e.level == "error" && !IsStale(e));
             }
         }
 
@@ -133,6 +141,39 @@ namespace Unitap
                 File.WriteAllText(FilePath, JsonConvert.SerializeObject(data));
             }
             catch { /* ignore */ }
+        }
+
+        static bool IsStale(CapturedEntry entry)
+        {
+            if (entry == null || string.IsNullOrEmpty(entry.file) || string.IsNullOrEmpty(entry.timestamp))
+            {
+                return false;
+            }
+
+            if (!DateTime.TryParse(entry.timestamp, null, System.Globalization.DateTimeStyles.RoundtripKind, out var capturedAt))
+            {
+                return false;
+            }
+
+            try
+            {
+                var path = entry.file;
+                if (!Path.IsPathRooted(path))
+                {
+                    path = Path.GetFullPath(Path.Combine(Application.dataPath, "..", path));
+                }
+
+                if (!File.Exists(path))
+                {
+                    return false;
+                }
+
+                return File.GetLastWriteTimeUtc(path) > capturedAt.ToUniversalTime();
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 }

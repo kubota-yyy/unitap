@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import time
@@ -101,6 +102,17 @@ def find_heartbeat(project_path: str | None = None) -> dict | None:
     return None
 
 
+def derive_pipe_name(project_path: str | None = None) -> str | None:
+    try:
+        root = resolve_project_root(project_path, allow_process_discovery=False)
+    except ProjectResolutionError:
+        return None
+
+    normalized = root.expanduser().absolute().as_posix().rstrip("/")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"unitap_{digest}"
+
+
 def check_heartbeat_fresh(heartbeat: dict) -> bool:
     """heartbeat の lastHeartbeat が新鮮かチェック"""
     threshold = HEARTBEAT_STALE_SECONDS_COMPILING if heartbeat.get("isCompiling") else HEARTBEAT_STALE_SECONDS
@@ -125,4 +137,3 @@ def check_heartbeat_fresh(heartbeat: dict) -> bool:
         return age < threshold
 
     return False
-

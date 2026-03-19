@@ -14,7 +14,7 @@ namespace Unitap
     /// 127.0.0.1 上でTCPリスナーを起動し、8byte長さプレフィックス+UTF-8 JSONフレームで通信する。
     /// 受信したリクエストを ConcurrentQueue に積み、メインスレッドで処理する。
     /// </summary>
-    public sealed class UnitapTcpHost : IDisposable
+    public sealed class UnitapTcpHost : IUnitapHost
     {
         public const int DefaultPort = 6400;
         public const int MaxPortScan = 10;
@@ -25,18 +25,12 @@ namespace Unitap
         public bool IsRunning => _running;
         public string LastStartError { get; private set; }
 
-        readonly ConcurrentQueue<PendingRequest> _inbox = new();
+        readonly ConcurrentQueue<UnitapPendingRequest> _inbox = new();
         TcpListener _listener;
         Thread _acceptThread;
         volatile bool _running;
 
-        public struct PendingRequest
-        {
-            public UnitapRequest Request;
-            public Action<UnitapResponse> Respond;
-        }
-
-        public bool TryDequeue(out PendingRequest req) => _inbox.TryDequeue(out req);
+        public bool TryDequeue(out UnitapPendingRequest req) => _inbox.TryDequeue(out req);
 
         public bool Start()
         {
@@ -150,7 +144,7 @@ namespace Unitap
 
                     // メインスレッドで処理するためキューに積む
                     var responded = false;
-                    var pending = new PendingRequest
+                    var pending = new UnitapPendingRequest
                     {
                         Request = req,
                         Respond = resp =>

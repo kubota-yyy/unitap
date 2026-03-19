@@ -51,6 +51,16 @@ namespace Unitap
     {
         [JsonProperty("pid")] public int Pid { get; set; }
         [JsonProperty("port")] public int Port { get; set; }
+        [JsonProperty("pipeName", NullValueHandling = NullValueHandling.Ignore)]
+        public string PipeName { get; set; }
+        [JsonProperty("pipeSocketPath", NullValueHandling = NullValueHandling.Ignore)]
+        public string PipeSocketPath { get; set; }
+        [JsonProperty("fileTransportDir", NullValueHandling = NullValueHandling.Ignore)]
+        public string FileTransportDir { get; set; }
+        [JsonProperty("availableTransports", NullValueHandling = NullValueHandling.Ignore)]
+        public string[] AvailableTransports { get; set; }
+        [JsonProperty("pidFile", NullValueHandling = NullValueHandling.Ignore)]
+        public string PidFile { get; set; }
         [JsonProperty("projectPath")] public string ProjectPath { get; set; }
         [JsonProperty("projectName")] public string ProjectName { get; set; }
         [JsonProperty("unityVersion")] public string UnityVersion { get; set; }

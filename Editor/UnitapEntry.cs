@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using UnityEditor;
 using UnityEngine;
 
@@ -13,7 +15,9 @@ namespace Unitap
         const int HostStartRetryMax = 5;
         const double HostStartRetryIntervalSeconds = 1.0;
 
-        static UnitapTcpHost _host;
+        static UnitapTcpHost _tcpHost;
+        static UnitapPipeHost _pipeHost;
+        static UnitapFileHost _fileHost;
         static UnitapHeartbeat _heartbeat;
         static UnitapConsoleCapture _console;
         static UnitapDispatcher _dispatcher;
@@ -48,19 +52,44 @@ namespace Unitap
         static void Initialize()
         {
             Shutdown(deleteHeartbeat: false); // 既存インスタンスを破棄（heartbeatファイルは残す）
+            EnsurePidFile();
 
             _console = new UnitapConsoleCapture();
             _console.Start();
 
-            _host = new UnitapTcpHost();
-            if (!_host.Start())
+            _tcpHost = new UnitapTcpHost();
+            var tcpStarted = _tcpHost.Start();
+            if (!tcpStarted)
+            {
+                var reason = string.IsNullOrEmpty(_tcpHost.LastStartError) ? "unknown" : _tcpHost.LastStartError;
+                Debug.LogWarning($"[Unitap] Failed to start TCP host ({_hostStartRetryCount + 1}/{HostStartRetryMax}): {reason}");
+                _tcpHost.Dispose();
+                _tcpHost = null;
+            }
+
+            _pipeHost = new UnitapPipeHost();
+            var pipeStarted = _pipeHost.Start();
+            if (!pipeStarted)
+            {
+                var reason = string.IsNullOrEmpty(_pipeHost.LastStartError) ? "unknown" : _pipeHost.LastStartError;
+                Debug.LogWarning($"[Unitap] Failed to start pipe host ({reason})");
+                _pipeHost.Dispose();
+                _pipeHost = null;
+            }
+
+            _fileHost = new UnitapFileHost();
+            var fileStarted = _fileHost.Start();
+            if (!fileStarted)
+            {
+                var reason = string.IsNullOrEmpty(_fileHost.LastStartError) ? "unknown" : _fileHost.LastStartError;
+                Debug.LogWarning($"[Unitap] Failed to start file host ({reason})");
+                _fileHost.Dispose();
+                _fileHost = null;
+            }
+
+            if (!tcpStarted && !pipeStarted && !fileStarted)
             {
                 _hostStartRetryCount++;
-                var reason = string.IsNullOrEmpty(_host.LastStartError) ? "unknown" : _host.LastStartError;
-                Debug.LogWarning($"[Unitap] Failed to start TCP host ({_hostStartRetryCount}/{HostStartRetryMax}): {reason}");
-
-                _host.Dispose();
-                _host = null;
                 _console?.Dispose();
                 _console = null;
 
@@ -72,14 +101,15 @@ namespace Unitap
                 }
                 else
                 {
-                    Debug.LogError("[Unitap] Failed to start TCP host after retries");
+                    Debug.LogError("[Unitap] Failed to start Unitap hosts after retries");
                 }
                 return;
             }
+
             _hostStartRetryCount = 0;
 
             _heartbeat = new UnitapHeartbeat();
-            _heartbeat.Start(_host.BoundPort);
+            _heartbeat.Start(_tcpHost?.BoundPort ?? 0, _pipeHost?.PipeName, _fileHost?.RootDirectory);
 
             _dispatcher = new UnitapDispatcher();
             _dispatcher.Init();
@@ -98,7 +128,10 @@ namespace Unitap
             AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
 
-            Debug.Log($"[Unitap] Started on port {_host.BoundPort}");
+            var tcpInfo = _tcpHost != null ? $"tcp:{_tcpHost.BoundPort}" : "tcp:off";
+            var pipeInfo = _pipeHost != null ? $"pipe:{_pipeHost.PipeName}" : "pipe:off";
+            var fileInfo = _fileHost != null ? $"file:{_fileHost.RootDirectory}" : "file:off";
+            Debug.Log($"[Unitap] Started ({tcpInfo}, {pipeInfo}, {fileInfo})");
         }
 
         static void RegisterCommands()
@@ -124,12 +157,18 @@ namespace Unitap
 
         static void Tick()
         {
-            if (_host == null || !_host.IsRunning) return;
+            if ((_tcpHost == null || !_tcpHost.IsRunning) &&
+                (_pipeHost == null || !_pipeHost.IsRunning) &&
+                (_fileHost == null || !_fileHost.IsRunning)) return;
             _heartbeat?.Tick();
-            _dispatcher?.ProcessQueue(_host);
+            _dispatcher?.ProcessQueue(_tcpHost, _pipeHost, _fileHost);
         }
 
-        static void OnQuitting() => Shutdown(deleteHeartbeat: true);
+        static void OnQuitting()
+        {
+            Shutdown(deleteHeartbeat: true);
+            DeletePidFile();
+        }
         static void OnBeforeAssemblyReload()
         {
             _heartbeat?.WriteReloading();
@@ -140,11 +179,15 @@ namespace Unitap
         {
             EditorApplication.update -= Tick;
             EditorApplication.update -= RetryInitialize;
-            _host?.Dispose();
+            _tcpHost?.Dispose();
+            _pipeHost?.Dispose();
+            _fileHost?.Dispose();
             _console?.Dispose();
             if (deleteHeartbeat)
                 _heartbeat?.Dispose(); // ファイル削除はエディタ終了時のみ
-            _host = null;
+            _tcpHost = null;
+            _pipeHost = null;
+            _fileHost = null;
             _heartbeat = null;
             _console = null;
             _dispatcher = null;
@@ -159,5 +202,40 @@ namespace Unitap
         /// 直近のエディタ状態を取得 (メインスレッド外での参照用)
         /// </summary>
         public static EditorState GetLastKnownEditorState() => UnitapDispatcher.GetLastKnownEditorState();
+
+        static void EnsurePidFile()
+        {
+            try
+            {
+                var path = UnitapPipeName.GetPidFilePath();
+                var dir = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                File.WriteAllText(path, System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Unitap] Failed to write PID file: {ex.Message}");
+            }
+        }
+
+        static void DeletePidFile()
+        {
+            try
+            {
+                var path = UnitapPipeName.GetPidFilePath();
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
     }
 }

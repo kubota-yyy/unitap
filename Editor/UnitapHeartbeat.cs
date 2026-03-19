@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using Newtonsoft.Json;
@@ -15,12 +16,16 @@ namespace Unitap
     {
         string _heartbeatPath;
         int _port;
+        string _pipeName;
+        string _fileTransportDir;
         double _lastWrite;
         const double IntervalSeconds = 0.8;
 
-        public void Start(int port)
+        public void Start(int port, string pipeName, string fileTransportDir)
         {
             _port = port;
+            _pipeName = pipeName;
+            _fileTransportDir = fileTransportDir;
             var dir = Path.Combine(Application.dataPath, "..", "Library", "Unitap");
             Directory.CreateDirectory(dir);
             // ディレクトリのパーミッション設定 (Unix系のみ)
@@ -58,6 +63,11 @@ namespace Unitap
                 {
                     Pid = Process.GetCurrentProcess().Id,
                     Port = _port,
+                    PipeName = _pipeName,
+                    PipeSocketPath = UnitapPipeName.GetUnixSocketPath(_pipeName),
+                    FileTransportDir = _fileTransportDir,
+                    AvailableTransports = BuildAvailableTransports(),
+                    PidFile = UnitapPipeName.GetPidFilePath(),
                     ProjectPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..")),
                     ProjectName = Application.productName,
                     UnityVersion = Application.unityVersion,
@@ -91,6 +101,11 @@ namespace Unitap
             {
                 Pid = Process.GetCurrentProcess().Id,
                 Port = _port,
+                PipeName = _pipeName,
+                PipeSocketPath = UnitapPipeName.GetUnixSocketPath(_pipeName),
+                FileTransportDir = _fileTransportDir,
+                AvailableTransports = BuildAvailableTransports(),
+                PidFile = UnitapPipeName.GetPidFilePath(),
                 ProjectPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..")),
                 ProjectName = Application.productName,
                 UnityVersion = Application.unityVersion,
@@ -145,6 +160,27 @@ namespace Unitap
                 count += console.ErrorCount;
             count += UnitapCompileErrorCapture.ErrorCount;
             return (count > 0, count);
+        }
+
+        string[] BuildAvailableTransports()
+        {
+            var transports = new List<string>();
+            if (_port > 0)
+            {
+                transports.Add("tcp");
+            }
+
+            if (!string.IsNullOrEmpty(_pipeName))
+            {
+                transports.Add("pipe");
+            }
+
+            if (!string.IsNullOrEmpty(_fileTransportDir))
+            {
+                transports.Add("file");
+            }
+
+            return transports.ToArray();
         }
     }
 }

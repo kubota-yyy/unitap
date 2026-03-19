@@ -1,27 +1,34 @@
 import json
+import os
 import socket
 import struct
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .constants import (
     CONNECTION_RETRY_INTERVAL,
     CONNECTION_RETRY_MAX,
     DEFAULT_TIMEOUT_MS,
+    FILE_RESPONSE_POLL_INTERVAL,
+    FILE_TEST_TIMEOUT,
     HEADER_SIZE,
     LIVENESS_RECONNECT_RETRY_MAX,
+    PIPE_HEADER_SIZE,
+    PIPE_TEST_TIMEOUT,
     POLL_INTERVAL,
     TCP_TEST_TIMEOUT,
+    UNITAP_TRANSPORT_ENV,
 )
 from .editor_log import find_project_root, parse_editor_log_snapshot, read_compile_errors
-from .heartbeat import check_heartbeat_fresh, find_heartbeat
+from .heartbeat import check_heartbeat_fresh, derive_pipe_name, find_heartbeat
 from .unity import is_unity_process_running
 
 
-def send_request(host: str, port: int, request: dict, timeout_s: float = 30) -> dict:
-    """TCP 接続してリクエストを送信し、レスポンスを受信"""
+def _send_tcp_request(host: str, port: int, request: dict, timeout_s: float = 30) -> dict:
     payload = json.dumps(request).encode("utf-8")
     header = struct.pack(">q", len(payload))
 
@@ -54,6 +61,255 @@ def recv_exact(sock: socket.socket, count: int) -> bytes:
     return bytes(buf)
 
 
+def _recv_pipe_exact(sock: socket.socket, count: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < count:
+        chunk = sock.recv(count - len(buf))
+        if not chunk:
+            raise ConnectionError("Pipe connection closed")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _normalize_transport(value: str | None) -> str:
+    normalized = (value or "auto").strip().lower()
+    if normalized in ("tcp", "pipe", "file", "auto"):
+        return normalized
+    return "auto"
+
+
+def _has_pipe_transport(heartbeat: dict | None) -> bool:
+    return bool(heartbeat and (heartbeat.get("pipeName") or "pipe" in (heartbeat.get("availableTransports") or [])))
+
+
+def _has_file_transport(heartbeat: dict | None) -> bool:
+    return bool(heartbeat and (heartbeat.get("fileTransportDir") or "file" in (heartbeat.get("availableTransports") or [])))
+
+
+def _should_prefer_file(project_path: str | None, heartbeat: dict | None = None) -> bool:
+    transport = _normalize_transport(os.environ.get(UNITAP_TRANSPORT_ENV))
+    if transport == "file":
+        return True
+    if transport in ("tcp", "pipe"):
+        return False
+
+    hb = heartbeat or find_heartbeat(project_path)
+    if not _has_file_transport(hb):
+        return False
+
+    return os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"
+
+
+def _should_prefer_pipe(project_path: str | None, heartbeat: dict | None = None) -> bool:
+    transport = _normalize_transport(os.environ.get(UNITAP_TRANSPORT_ENV))
+    if transport == "pipe":
+        return True
+    if transport in ("tcp", "file"):
+        return False
+
+    hb = heartbeat or find_heartbeat(project_path)
+    if _should_prefer_file(project_path, hb):
+        return False
+    if not _has_pipe_transport(hb):
+        return False
+
+    return os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED") == "1"
+
+
+def _can_fallback_to_pipe(project_path: str | None, heartbeat: dict | None = None) -> bool:
+    transport = _normalize_transport(os.environ.get(UNITAP_TRANSPORT_ENV))
+    if transport in ("tcp", "file"):
+        return False
+    hb = heartbeat or find_heartbeat(project_path)
+    return _has_pipe_transport(hb)
+
+
+def _can_fallback_to_file(project_path: str | None, heartbeat: dict | None = None) -> bool:
+    transport = _normalize_transport(os.environ.get(UNITAP_TRANSPORT_ENV))
+    if transport in ("tcp", "pipe"):
+        return False
+    hb = heartbeat or find_heartbeat(project_path)
+    return _has_file_transport(hb)
+
+
+def _resolve_pipe_name(project_path: str | None, heartbeat: dict | None = None) -> str:
+    hb = heartbeat or find_heartbeat(project_path)
+    pipe_name = hb.get("pipeName") if isinstance(hb, dict) else None
+    if pipe_name:
+        return str(pipe_name)
+
+    derived = derive_pipe_name(project_path)
+    if derived:
+        return derived
+    raise ConnectionError("Pipe transport is unavailable: pipeName could not be resolved")
+
+
+def _resolve_file_transport_dir(project_path: str | None, heartbeat: dict | None = None) -> Path:
+    hb = heartbeat or find_heartbeat(project_path)
+    file_transport_dir = hb.get("fileTransportDir") if isinstance(hb, dict) else None
+    if file_transport_dir:
+        return Path(str(file_transport_dir))
+
+    root = find_project_root(project_path)
+    if root:
+        return Path(root) / "Library" / "Unitap" / "file-transport"
+
+    script_root = Path(__file__).resolve().parents[3]
+    return script_root / "Library" / "Unitap" / "file-transport"
+
+
+def _pipe_socket_candidates(pipe_name: str) -> list[Path]:
+    base_name = f"CoreFxPipe_{pipe_name}"
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    for directory in (Path(tempfile.gettempdir()), Path("/tmp"), Path("/private/tmp")):
+        directory = directory.expanduser()
+        if not directory.exists():
+            continue
+
+        direct = directory / base_name
+        key = str(direct)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(direct)
+
+        for path in directory.glob(f"{base_name}*"):
+            key = str(path)
+            if key not in seen:
+                seen.add(key)
+                candidates.append(path)
+
+    return candidates
+
+
+def _resolve_pipe_socket_path(pipe_name: str) -> Path:
+    candidates = _pipe_socket_candidates(pipe_name)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0] if candidates else Path(tempfile.gettempdir()) / f"CoreFxPipe_{pipe_name}"
+
+
+def _send_pipe_request(pipe_name: str, request: dict, timeout_s: float = 30) -> dict:
+    if os.name == "nt":
+        raise ConnectionError("Pipe transport is not implemented for this Python environment on Windows")
+
+    socket_path = _resolve_pipe_socket_path(pipe_name)
+    payload = json.dumps(request).encode("utf-8")
+    header = len(payload).to_bytes(PIPE_HEADER_SIZE, "little", signed=False)
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout_s)
+    try:
+        sock.connect(str(socket_path))
+        sock.sendall(header)
+        sock.sendall(payload)
+
+        ack = _recv_pipe_exact(sock, 1)
+        if ack != b"\x01":
+            raise RuntimeError(f"Unexpected ACK byte from Unitap pipe server: 0x{ack[0]:02X}")
+
+        sock.settimeout(None)
+        resp_header = _recv_pipe_exact(sock, PIPE_HEADER_SIZE)
+        resp_len = int.from_bytes(resp_header, "little", signed=False)
+        if resp_len <= 0 or resp_len > 64 * 1024 * 1024:
+            raise RuntimeError(f"Invalid pipe response frame size: {resp_len}")
+
+        resp_payload = _recv_pipe_exact(sock, resp_len)
+        return json.loads(resp_payload.decode("utf-8"))
+    finally:
+        sock.close()
+
+
+def _send_file_request(file_transport_dir: Path, request: dict, timeout_s: float = 30) -> dict:
+    request_id = str(request.get("requestId") or uuid.uuid4())
+    request["requestId"] = request_id
+
+    requests_dir = file_transport_dir / "requests"
+    responses_dir = file_transport_dir / "responses"
+    processing_dir = file_transport_dir / "processing"
+    requests_dir.mkdir(parents=True, exist_ok=True)
+    responses_dir.mkdir(parents=True, exist_ok=True)
+    processing_dir.mkdir(parents=True, exist_ok=True)
+
+    request_path = requests_dir / f"{request_id}.json"
+    temp_request_path = requests_dir / f"{request_id}.{uuid.uuid4().hex}.tmp"
+    response_path = responses_dir / f"{request_id}.json"
+
+    for path in (request_path, response_path):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
+
+    temp_request_path.write_text(json.dumps(request), encoding="utf-8")
+    temp_request_path.replace(request_path)
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        try:
+            if response_path.exists():
+                payload = response_path.read_text(encoding="utf-8")
+                try:
+                    response_path.unlink()
+                except OSError:
+                    pass
+                return json.loads(payload)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        time.sleep(FILE_RESPONSE_POLL_INTERVAL)
+
+    raise TimeoutError(f"Timed out waiting for Unitap file transport response ({request_id})")
+
+
+def _preferred_transport(project_path: str | None, heartbeat: dict | None = None) -> str:
+    hb = heartbeat or find_heartbeat(project_path)
+    transport = _normalize_transport(os.environ.get(UNITAP_TRANSPORT_ENV))
+    if transport == "file":
+        return "file"
+    if transport == "pipe":
+        return "pipe"
+    if transport == "tcp":
+        return "tcp"
+    if _should_prefer_file(project_path, hb):
+        return "file"
+    if _should_prefer_pipe(project_path, hb):
+        return "pipe"
+    return "tcp"
+
+
+def send_request(
+    host: str,
+    port: int,
+    request: dict,
+    timeout_s: float = 30,
+    project_path: str | None = None,
+    heartbeat: dict | None = None,
+) -> dict:
+    """利用可能な local transport(TCP/pipe/file) でリクエストを送信する。"""
+    preferred_transport = _preferred_transport(project_path, heartbeat)
+    if preferred_transport == "file":
+        file_transport_dir = _resolve_file_transport_dir(project_path, heartbeat)
+        return _send_file_request(file_transport_dir, request, timeout_s)
+    if preferred_transport == "pipe":
+        pipe_name = _resolve_pipe_name(project_path, heartbeat)
+        return _send_pipe_request(pipe_name, request, timeout_s)
+
+    try:
+        return _send_tcp_request(host, port, request, timeout_s)
+    except (PermissionError, ConnectionRefusedError, ConnectionError, ConnectionResetError, TimeoutError, OSError) as ex:
+        if _can_fallback_to_file(project_path, heartbeat):
+            file_transport_dir = _resolve_file_transport_dir(project_path, heartbeat)
+            return _send_file_request(file_transport_dir, request, timeout_s)
+        if not _can_fallback_to_pipe(project_path, heartbeat):
+            raise
+        pipe_name = _resolve_pipe_name(project_path, heartbeat)
+        return _send_pipe_request(pipe_name, request, timeout_s)
+
+
 def build_request(command: str, params: dict | None = None, timeout_ms: int = DEFAULT_TIMEOUT_MS, retryable: bool = True) -> dict:
     """リクエスト JSON を構築"""
     return {
@@ -75,7 +331,7 @@ def wait_for_connection(
     on_wait_retry=None,
 ) -> dict | None:
     """heartbeat が fresh になるまで待機し、接続情報を返す。
-    require_tcp=True の場合、TCP接続が確認できるまで待機する。"""
+    require_tcp=True の場合、利用可能な transport で実接続確認まで待機する。"""
     ever_seen_heartbeat = False
     for i in range(max_retries):
         if i > 0:
@@ -105,10 +361,10 @@ def wait_for_connection(
 
         if hb.get("isCompiling"):
             if require_tcp:
-                # ドメインリロード完了後、heartbeat更新前にTCPが復帰している可能性
+                # ドメインリロード完了後、heartbeat更新前に transport が復帰している可能性
                 try:
                     test_req = build_request("status", {}, 1000)
-                    send_request("127.0.0.1", hb["port"], test_req, timeout_s=1)
+                    send_request("127.0.0.1", hb["port"], test_req, timeout_s=1, project_path=project_path, heartbeat=hb)
                     return hb
                 except Exception:
                     pass  # TCP未復帰 → 次のループへ
@@ -118,13 +374,21 @@ def wait_for_connection(
         if not require_tcp:
             return hb
 
-        # TCP接続を確認
+        # 利用可能 transport で接続を確認
         try:
-            test_req = build_request("status", {}, TCP_TEST_TIMEOUT * 1000)
-            send_request("127.0.0.1", hb["port"], test_req, timeout_s=TCP_TEST_TIMEOUT)
+            preferred_transport = _preferred_transport(project_path, hb)
+            if preferred_transport == "file":
+                test_timeout_s = FILE_TEST_TIMEOUT
+            elif preferred_transport == "pipe":
+                test_timeout_s = PIPE_TEST_TIMEOUT
+            else:
+                test_timeout_s = TCP_TEST_TIMEOUT
+            test_req = build_request("status", {}, int(test_timeout_s * 1000))
+            send_request("127.0.0.1", hb["port"], test_req, timeout_s=test_timeout_s, project_path=project_path, heartbeat=hb)
             return hb
         except Exception:
-            print(f"  waiting for Unity... (tcp not ready, {i+1}/{max_retries})", file=sys.stderr)
+            transport_name = _preferred_transport(project_path, hb)
+            print(f"  waiting for Unity... ({transport_name} not ready, {i+1}/{max_retries})", file=sys.stderr)
             continue
     return None
 
@@ -137,13 +401,13 @@ def send_with_retry(
     project_path: str | None,
     exit_on_error: bool = True,
 ) -> dict:
-    """TCP送信。Connection refused/closed 時にドメインリロード待ちでリトライ"""
+    """利用可能な local transport で送信し、ドメインリロード時は復帰待ちでリトライする。"""
     current_port = port
 
     for attempt in range(3):  # 復帰後の再接続断に備えて最大3回リトライ
         try:
-            return send_request(host, current_port, request, timeout_s)
-        except (ConnectionRefusedError, ConnectionError, ConnectionResetError, TimeoutError) as e:
+            return send_request(host, current_port, request, timeout_s, project_path=project_path)
+        except (ConnectionRefusedError, ConnectionError, ConnectionResetError, TimeoutError, PermissionError, OSError) as e:
             if attempt == 0:
                 hb = find_heartbeat(project_path)
                 if not hb:
@@ -154,7 +418,7 @@ def send_with_retry(
                         require_tcp=True,
                     )
                     if recovered_hb:
-                        current_port = recovered_hb["port"]
+                        current_port = recovered_hb.get("port", current_port)
                         request["requestId"] = str(uuid.uuid4())
                         continue
 
@@ -193,7 +457,7 @@ def send_with_retry(
                 sys.exit(1)
             raise ConnectionError("Unity did not recover in time")
 
-        current_port = hb["port"]
+        current_port = hb.get("port", current_port)
         request["requestId"] = str(uuid.uuid4())
 
     if exit_on_error:
@@ -210,11 +474,11 @@ def extract_wait_idle_state(result: dict, project_path: str | None) -> tuple[boo
 
     hb = find_heartbeat(project_path)
     if hb:
-        port = hb.get("port")
-        if port:
+        port = int(hb.get("port") or 0)
+        if port or hb.get("pipeName"):
             try:
                 status_req = build_request("status", {}, 5000)
-                status_resp = send_request("127.0.0.1", int(port), status_req, timeout_s=5)
+                status_resp = send_request("127.0.0.1", port, status_req, timeout_s=5, project_path=project_path, heartbeat=hb)
                 if status_resp.get("ok"):
                     status_result = status_resp.get("result", {})
                     return bool(status_result.get("isCompiling")), bool(status_result.get("isUpdating"))
@@ -322,7 +586,7 @@ def poll_async_job(host: str, port: int, command: str, params: dict, timeout_ms:
 
         poll_req = build_request(command, poll_params, request_timeout_ms, False)
         try:
-            resp = send_request(host, current_port, poll_req, timeout_s=request_timeout_s)
+            resp = send_request(host, current_port, poll_req, timeout_s=request_timeout_s, project_path=project_path)
         except (ConnectionRefusedError, ConnectionError, ConnectionResetError, socket.timeout) as ex:
             # ドメインリロード中: プロセス生存 + heartbeat を複合判定してから復帰待ち
             print(f"Connection lost during poll ({ex}), checking Unity state...", file=sys.stderr)

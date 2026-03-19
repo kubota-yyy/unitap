@@ -38,7 +38,7 @@ namespace Unitap
         /// <summary>
         /// メインスレッドから呼ばれる。キューから取り出して実行。
         /// </summary>
-        public void ProcessQueue(UnitapTcpHost host)
+        public void ProcessQueue(params IUnitapHost[] hosts)
         {
             // 5分ごとに古い idempotency key をパージ
             var now = EditorApplication.timeSinceStartup;
@@ -50,51 +50,65 @@ namespace Unitap
 
             // 1フレームで最大8件処理 (UIフリーズ防止)
             int processed = 0;
-            while (processed < 8 && host.TryDequeue(out var pending))
+            if (hosts == null)
             {
-                processed++;
-                var req = pending.Request;
-                UnitapResponse resp;
+                return;
+            }
 
-                try
+            foreach (var host in hosts)
+            {
+                if (host == null)
                 {
-                    // idempotencyKey 重複チェック
-                    if (!string.IsNullOrEmpty(req.IdempotencyKey) && _processedKeys.TryGetValue(req.IdempotencyKey, out _))
-                    {
-                        resp = MakeOk(req.RequestId, new { duplicate = true, message = "Already processed" });
-                        pending.Respond(resp);
-                        continue;
-                    }
-
-                    if (!_commands.TryGetValue(req.Command, out var cmd))
-                    {
-                        resp = MakeError(req.RequestId, "unknown_command", $"Unknown command: {req.Command}");
-                        pending.Respond(resp);
-                        continue;
-                    }
-
-                    // ジャーナル記録: received
-                    WriteJournal(req.IdempotencyKey, "received", req.Command);
-
-                    // コマンド実行
-                    var result = cmd.Execute(req);
-
-                    // idempotencyKey 記録
-                    if (!string.IsNullOrEmpty(req.IdempotencyKey))
-                        _processedKeys.TryAdd(req.IdempotencyKey, DateTime.UtcNow);
-
-                    // ジャーナル記録: completed
-                    WriteJournal(req.IdempotencyKey, "completed", req.Command);
-
-                    resp = MakeOk(req.RequestId, result);
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[Unitap] Command '{req.Command}' error: {ex}");
-                    resp = MakeError(req.RequestId, "execution_error", ex.Message);
+                    continue;
                 }
 
-                pending.Respond(resp);
+                while (processed < 8 && host.TryDequeue(out var pending))
+                {
+                    processed++;
+                    var req = pending.Request;
+                    UnitapResponse resp;
+
+                    try
+                    {
+                        // idempotencyKey 重複チェック
+                        if (!string.IsNullOrEmpty(req.IdempotencyKey) && _processedKeys.TryGetValue(req.IdempotencyKey, out _))
+                        {
+                            resp = MakeOk(req.RequestId, new { duplicate = true, message = "Already processed" });
+                            pending.Respond(resp);
+                            continue;
+                        }
+
+                        if (!_commands.TryGetValue(req.Command, out var cmd))
+                        {
+                            resp = MakeError(req.RequestId, "unknown_command", $"Unknown command: {req.Command}");
+                            pending.Respond(resp);
+                            continue;
+                        }
+
+                        WriteJournal(req.IdempotencyKey, "received", req.Command);
+                        var result = cmd.Execute(req);
+
+                        if (!string.IsNullOrEmpty(req.IdempotencyKey))
+                        {
+                            _processedKeys.TryAdd(req.IdempotencyKey, DateTime.UtcNow);
+                        }
+
+                        WriteJournal(req.IdempotencyKey, "completed", req.Command);
+                        resp = MakeOk(req.RequestId, result);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogError($"[Unitap] Command '{req.Command}' error: {ex}");
+                        resp = MakeError(req.RequestId, "execution_error", ex.Message);
+                    }
+
+                    pending.Respond(resp);
+                }
+
+                if (processed >= 8)
+                {
+                    break;
+                }
             }
         }
 
