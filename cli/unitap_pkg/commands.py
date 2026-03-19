@@ -125,7 +125,11 @@ def do_launch(args) -> None:
 
     if running_same_project and not args.restart:
         hb = find_heartbeat(args.project)
-        connected = bool(hb and hb.get("port") and check_heartbeat_fresh(hb))
+        connected = bool(
+            hb
+            and check_heartbeat_fresh(hb)
+            and (hb.get("port") or hb.get("pipeName"))
+        )
         if not connected and not args.no_wait:
             timeout_s = args.wait_timeout
             max_retries = max(timeout_s // CONNECTION_RETRY_INTERVAL, 1)
@@ -144,6 +148,8 @@ def do_launch(args) -> None:
         }
         if hb and hb.get("port"):
             payload["port"] = hb.get("port")
+        if hb and hb.get("pipeName"):
+            payload["pipeName"] = hb.get("pipeName")
         print(json.dumps(payload, indent=2))
         return
 
@@ -231,14 +237,17 @@ def do_launch(args) -> None:
     hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True)
 
     if hb:
-        print(json.dumps({
+        payload = {
             "ok": True,
             "launched": True,
             "connected": True,
             "version": version,
             "projectPath": str(project_root),
             "port": hb.get("port"),
-        }, indent=2))
+        }
+        if hb.get("pipeName"):
+            payload["pipeName"] = hb.get("pipeName")
+        print(json.dumps(payload, indent=2))
     else:
         # プロセスが存在するかだけ確認
         process_running = is_unity_process_running(project_root)
@@ -317,7 +326,7 @@ def do_capture(args, port: int) -> None:
         print("Play mode required, starting Play mode...", file=sys.stderr)
         try:
             play_req = build_request("play", {}, 10000, False)
-            send_request("127.0.0.1", port, play_req, timeout_s=15)
+            send_request("127.0.0.1", port, play_req, timeout_s=15, project_path=args.project)
         except Exception:
             pass
         hb = wait_for_connection(args.project, require_tcp=True)
@@ -331,7 +340,7 @@ def do_capture(args, port: int) -> None:
             time.sleep(1)
             try:
                 status_req = build_request("status", {}, 5000)
-                status_resp = send_request("127.0.0.1", port, status_req, timeout_s=5)
+                status_resp = send_request("127.0.0.1", port, status_req, timeout_s=5, project_path=args.project)
                 if status_resp.get("ok") and status_resp.get("result", {}).get("isPlaying"):
                     break
             except Exception:
