@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using Newtonsoft.Json;
@@ -15,17 +14,13 @@ namespace Unitap
     public sealed class UnitapHeartbeat : IDisposable
     {
         string _heartbeatPath;
-        int _port;
-        string _pipeName;
-        string _fileTransportDir;
+        UnitapTransportInfo _transportInfo;
         double _lastWrite;
         const double IntervalSeconds = 0.8;
 
-        public void Start(int port, string pipeName, string fileTransportDir)
+        public void Start(UnitapTransportInfo transportInfo)
         {
-            _port = port;
-            _pipeName = pipeName;
-            _fileTransportDir = fileTransportDir;
+            _transportInfo = transportInfo;
             var dir = Path.Combine(Application.dataPath, "..", "Library", "Unitap");
             Directory.CreateDirectory(dir);
             // ディレクトリのパーミッション設定 (Unix系のみ)
@@ -62,12 +57,7 @@ namespace Unitap
                 var data = new HeartbeatData
                 {
                     Pid = Process.GetCurrentProcess().Id,
-                    Port = _port,
-                    PipeName = _pipeName,
-                    PipeSocketPath = UnitapPipeName.GetUnixSocketPath(_pipeName),
-                    FileTransportDir = _fileTransportDir,
-                    AvailableTransports = BuildAvailableTransports(),
-                    PidFile = UnitapPipeName.GetPidFilePath(),
+                    Port = _transportInfo?.Port,
                     ProjectPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..")),
                     ProjectName = Application.productName,
                     UnityVersion = Application.unityVersion,
@@ -75,7 +65,13 @@ namespace Unitap
                     IsCompiling = true,
                     IsPlaying = false,
                     HasErrors = false,
-                    ErrorCount = 0
+                    ErrorCount = 0,
+                    TimeSinceStartup = UnityEditor.EditorApplication.timeSinceStartup,
+                    TransportKind = _transportInfo?.Kind ?? "unknown",
+                    Host = _transportInfo?.Host,
+                    PipeName = _transportInfo?.PipeName,
+                    PipeSocketPath = _transportInfo?.PipeSocketPath,
+                    FileTransportDirectory = _transportInfo?.FileTransportDirectory
                 };
                 var json = JsonConvert.SerializeObject(data, Formatting.Indented);
                 WriteHeartbeatAtomically(json);
@@ -91,6 +87,7 @@ namespace Unitap
                     File.Delete(_heartbeatPath);
             }
             catch { /* ignore */ }
+            _transportInfo = null;
         }
 
         void Write()
@@ -100,12 +97,7 @@ namespace Unitap
             var data = new HeartbeatData
             {
                 Pid = Process.GetCurrentProcess().Id,
-                Port = _port,
-                PipeName = _pipeName,
-                PipeSocketPath = UnitapPipeName.GetUnixSocketPath(_pipeName),
-                FileTransportDir = _fileTransportDir,
-                AvailableTransports = BuildAvailableTransports(),
-                PidFile = UnitapPipeName.GetPidFilePath(),
+                Port = _transportInfo?.Port,
                 ProjectPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..")),
                 ProjectName = Application.productName,
                 UnityVersion = Application.unityVersion,
@@ -113,7 +105,13 @@ namespace Unitap
                 IsCompiling = UnityEditor.EditorApplication.isCompiling,
                 IsPlaying = UnityEditor.EditorApplication.isPlaying,
                 HasErrors = errorStats.hasErrors,
-                ErrorCount = errorStats.count
+                ErrorCount = errorStats.count,
+                TimeSinceStartup = UnityEditor.EditorApplication.timeSinceStartup,
+                TransportKind = _transportInfo?.Kind ?? "unknown",
+                Host = _transportInfo?.Host,
+                PipeName = _transportInfo?.PipeName,
+                PipeSocketPath = _transportInfo?.PipeSocketPath,
+                FileTransportDirectory = _transportInfo?.FileTransportDirectory
             };
             try
             {
@@ -160,27 +158,6 @@ namespace Unitap
                 count += console.ErrorCount;
             count += UnitapCompileErrorCapture.ErrorCount;
             return (count > 0, count);
-        }
-
-        string[] BuildAvailableTransports()
-        {
-            var transports = new List<string>();
-            if (_port > 0)
-            {
-                transports.Add("tcp");
-            }
-
-            if (!string.IsNullOrEmpty(_pipeName))
-            {
-                transports.Add("pipe");
-            }
-
-            if (!string.IsNullOrEmpty(_fileTransportDir))
-            {
-                transports.Add("file");
-            }
-
-            return transports.ToArray();
         }
     }
 }

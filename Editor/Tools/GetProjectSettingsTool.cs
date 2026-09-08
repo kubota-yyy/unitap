@@ -2,6 +2,7 @@ using MCPForUnity.Editor.Helpers;
 using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 using UnityEditor;
+using UnityEditor.Build;
 using UnityEngine;
 
 namespace Unitap.Tools
@@ -37,8 +38,8 @@ namespace Unitap.Tools
                 allowedAutorotateToLandscapeLeft = PlayerSettings.allowedAutorotateToLandscapeLeft,
                 allowedAutorotateToLandscapeRight = PlayerSettings.allowedAutorotateToLandscapeRight,
                 statusBarHidden = PlayerSettings.statusBarHidden,
-                apiCompatibilityLevel = PlayerSettings.GetApiCompatibilityLevel(EditorUserBuildSettings.selectedBuildTargetGroup).ToString(),
-                scriptingBackend = PlayerSettings.GetScriptingBackend(EditorUserBuildSettings.selectedBuildTargetGroup).ToString(),
+                apiCompatibilityLevel = PlayerSettings.GetApiCompatibilityLevel(NamedBuildTarget.FromBuildTargetGroup(EditorUserBuildSettings.selectedBuildTargetGroup)).ToString(),
+                scriptingBackend = PlayerSettings.GetScriptingBackend(NamedBuildTarget.FromBuildTargetGroup(EditorUserBuildSettings.selectedBuildTargetGroup)).ToString(),
                 targetArchitecture = PlayerSettings.Android.targetArchitectures.ToString(),
                 colorSpace = PlayerSettings.colorSpace.ToString()
             });
@@ -66,7 +67,7 @@ namespace Unitap.Tools
                 activeBuildTarget = EditorUserBuildSettings.activeBuildTarget.ToString(),
                 selectedBuildTargetGroup = EditorUserBuildSettings.selectedBuildTargetGroup.ToString(),
                 development = EditorUserBuildSettings.development,
-                il2cpp = PlayerSettings.GetScriptingBackend(EditorUserBuildSettings.selectedBuildTargetGroup) == ScriptingImplementation.IL2CPP,
+                il2cpp = PlayerSettings.GetScriptingBackend(NamedBuildTarget.FromBuildTargetGroup(EditorUserBuildSettings.selectedBuildTargetGroup)) == ScriptingImplementation.IL2CPP,
                 buildAppBundle = EditorUserBuildSettings.buildAppBundle,
                 androidBuildSystem = EditorUserBuildSettings.androidBuildSystem.ToString()
             });

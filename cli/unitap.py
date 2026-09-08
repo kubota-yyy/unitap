@@ -18,7 +18,7 @@ Usage:
     unitap compile_check [--timeout 60000] [--focus-unity|--no-focus-unity] [--focus-wait-ms 350]
     unitap capture [--output /tmp/test.png] [--superSize 2]
     unitap capture_editor [--output /tmp/editor.png] [--window "Inspector"]
-    unitap launch [--restart] [--ignore-compiler-errors] [--no-kill] [--kill-project-only] [--no-wait] [--wait-timeout 180]
+    unitap launch [--restart] [--no-ignore-compiler-errors] [--no-kill] [--kill-project-only] [--no-wait] [--wait-timeout 180]
 """
 
 from unitap_pkg.cli import main

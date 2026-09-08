@@ -1,4 +1,3 @@
-import hashlib
 import json
 import re
 import time
@@ -102,17 +101,6 @@ def find_heartbeat(project_path: str | None = None) -> dict | None:
     return None
 
 
-def derive_pipe_name(project_path: str | None = None) -> str | None:
-    try:
-        root = resolve_project_root(project_path, allow_process_discovery=False)
-    except ProjectResolutionError:
-        return None
-
-    normalized = root.expanduser().absolute().as_posix().rstrip("/")
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
-    return f"unitap_{digest}"
-
-
 def check_heartbeat_fresh(heartbeat: dict) -> bool:
     """heartbeat の lastHeartbeat が新鮮かチェック"""
     threshold = HEARTBEAT_STALE_SECONDS_COMPILING if heartbeat.get("isCompiling") else HEARTBEAT_STALE_SECONDS
@@ -137,3 +125,22 @@ def check_heartbeat_fresh(heartbeat: dict) -> bool:
         return age < threshold
 
     return False
+
+
+def check_heartbeat_frozen(project_path: str | None = None, interval: float = 2.0) -> bool:
+    """ハートビートを2回読み、timeSinceStartup が変化していなければ frozen と判定する。
+    Returns True if frozen."""
+    hb1 = find_heartbeat(project_path)
+    if not hb1 or not check_heartbeat_fresh(hb1):
+        return False  # ハートビートがない/stale ならフリーズ判定不可
+    t1 = hb1.get("timeSinceStartup")
+    if t1 is None:
+        return False  # timeSinceStartup 未対応の古いバージョン
+    time.sleep(interval)
+    hb2 = find_heartbeat(project_path)
+    if not hb2 or not check_heartbeat_fresh(hb2):
+        return False
+    t2 = hb2.get("timeSinceStartup")
+    if t2 is None:
+        return False
+    return t1 == t2

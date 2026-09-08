@@ -9,10 +9,9 @@
 
 ## Features
 
-- **Zero config**: TCP / Pipe / File transport starts automatically via `[InitializeOnLoad]`
+- **Zero config**: Local transport starts automatically via `[InitializeOnLoad]`
 - **Heartbeat monitoring**: Detects stale connections and domain reloads
 - **Editor.log fallback**: Works even when TCP is unavailable (compiling, frozen)
-- **Sandbox-friendly local IPC**: `UNITAP_TRANSPORT=file` or auto fallback when TCP / AF_UNIX socket access is blocked
 - **Cross-platform**: macOS, Windows, Linux
 - **No external dependencies**: Python stdlib only (CLI), Newtonsoft.Json only (C#, bundled with Unity)
 - **Custom tool system**: Register your own tools via `[McpForUnityTool]` attribute
@@ -21,14 +20,13 @@
 
 MCP (Model Context Protocol) is the standard for connecting AI tools, but Unity Editor has unique constraints that make it a poor fit:
 
-| Challenge | MCP (stdio) | Unitap (local transports) |
+| Challenge | MCP (stdio) | Unitap (direct TCP) |
 |-----------|-------------|---------------------|
-| **Domain Reload** | Server process dies, client gets EOF, manual restart needed | Heartbeat detects reload → CLI waits → auto-reconnects on the recovered transport |
+| **Domain Reload** | Server process dies, client gets EOF, manual restart needed | Heartbeat detects reload → CLI waits → auto-reconnects on new port |
 | **Editor frozen / compiling** | stdio blocks, client hangs indefinitely | File-based fallback reads `Editor.log` and `compile-errors.json` |
 | **Liveness detection** | No built-in mechanism | Heartbeat file updated every 0.8s; stale = editor is dead |
-| **Sandboxed clients** | Host/sandbox dependent | Auto-selects TCP / Pipe / File transport based on what the client can use |
-| **Multiple editors** | One server per stdio pipe | Port auto-scan (6400-6409) + per-project heartbeat |
-| **Non-AI clients** | Requires MCP-compatible host | Any language with local file / socket access works |
+| **Multiple editors** | One server per stdio pipe | Port auto-scan (6400-6409) discovers all running editors |
+| **Non-AI clients** | Requires MCP-compatible host | Any language with a TCP socket works |
 | **Extra process** | Needs a bridge process between AI host and Unity | CLI talks directly to Unity, nothing in between |
 
 Unitap is designed for **resilience in hostile conditions** — compilation pauses, domain reloads, and frozen editors are normal in Unity workflows. The heartbeat + fallback architecture keeps the CLI functional even when the editor is temporarily unreachable.
@@ -62,6 +60,12 @@ Add to your `Packages/manifest.json`:
 }
 ```
 
+## UniCLI を unitap から使う
+
+既存の unitap 操作を維持し、汎用コマンドや一時的な C# 評価は `unitap unicli` から明示的に呼び出せます。プロジェクト指定、排他ロック、実行履歴、JSON の成功・失敗形式は unitap に統一します。UniCLI は任意の追加依存です。
+
+[使い分け・導入・検証済みコマンド](docs/unicli-bridge.md)
+
 ## CLI Usage
 
 Global options must appear before the subcommand:
@@ -70,12 +74,11 @@ Global options must appear before the subcommand:
 python3 cli/unitap.py --wait-lock --lock-timeout 900 compile_check --timeout 60000
 ```
 
-Exclusive commands keep a project-scoped lock under `Library/Unitap/.editor-op.lock`. If another long-running or destructive operation is already using Unitap, the default behavior is to fail fast with `Error [editor_busy]`. Add `--wait-lock` when you want the caller to queue behind the current lock holder instead of failing immediately.
+Exclusive commands keep a project-scoped lock under `Library/Unitap/.editor-op.lock`. If another long-running or destructive operation is already using Unitap, the default behavior is to wait for the lock. Add `--no-wait-lock` to fail fast with `Error [editor_busy]`, or set `--lock-timeout` to bound the wait.
 
 ```bash
 # Check editor status
 python3 cli/unitap.py status
-UNITAP_TRANSPORT=file python3 cli/unitap.py status
 
 # Play/Stop
 python3 cli/unitap.py play
@@ -104,31 +107,11 @@ python3 cli/unitap.py tool_list
 python3 cli/unitap.py tool_exec --tool find_assets --params '{"query": "Panel", "type": "Prefab"}'
 ```
 
-For long-running test flows, prefer wrapper commands such as `run_automate_test --wait`, `run_automate_batch`, and `run_playmode_test --wait` instead of raw `tool_exec --tool run_automate_test` / `run_playmode_test`. The wrapper commands hold the CLI lock for the full wait lifecycle, which prevents other clients from injecting `clear`, `stop`, or a second test start midway through the run.
+For long-running test flows, prefer wrapper commands such as `run_automate_test --wait`, `run_automate_batch`, and `run_playmode_test --wait` instead of raw `tool_exec --tool run_automate_test` / `run_playmode_test`.
 
-## Heartbeat
-
-`Library/Unitap/.heartbeat.json` exposes the current editor process and available transports.
-
-Current fields include:
-
-- `pid`
-- `port`
-- `pipeName`
-- `pipeSocketPath`
-- `fileTransportDir`
-- `availableTransports`
-- `pidFile`
-- `projectPath`
-- `projectName`
-- `unityVersion`
-- `lastHeartbeat`
-- `isCompiling`
-- `isPlaying`
-- `hasErrors`
-- `errorCount`
-
-The CLI uses this file to decide whether Unity is alive, whether a domain reload is in progress, and which transport it should try next.
+- `run_automate_test --wait` / `run_automate_batch` keep the CLI lock for the wait lifecycle.
+- `run_playmode_test --wait` acquires the lock only for `clear` / test start / fallback clear. The wait loop itself does not hold the CLI lock, so `diagnose`, `status`, and other lock-aware callers can keep observing the editor while PlayMode wait is in progress.
+- `run_playmode_test --wait` can finish in two fallback modes: `TestResults.xml` completion fallback, or `stale_idle` error when Unity is idle and `TestResults.xml` has not advanced for the configured stale window.
 
 ## Custom Tools
 
@@ -191,31 +174,12 @@ Optional hooks:
 Unity Editor (C#)              CLI (Python)
 +------------------+           +------------------+
 | UnitapEntry      |           | unitap.py        |
-| UnitapTcpHost /  | <--local-> | transport.py    |
-| UnitapPipeHost / |           |                 |
-| UnitapFileHost   |           |                 |
+| UnitapTcpHost    | <--TCP--> | transport.py     |
 | UnitapDispatcher |           | cli.py           |
 | Commands/        |           | commands.py      |
 | Tools/           |           | heartbeat.py     |
 +------------------+           +------------------+
 ```
-
-## Transport Selection
-
-- Default: `auto`. Normally Unitap uses TCP. When localhost TCP is blocked it can fall back to Pipe, and when socket-based IPC is blocked it can fall back to File transport.
-- 明示的に Pipe を使う: `UNITAP_TRANSPORT=pipe python3 tools/unitap/unitap.py status`
-- 明示的に File transport を使う: `UNITAP_TRANSPORT=file python3 tools/unitap/unitap.py status`
-- 明示的に TCP を使う: `UNITAP_TRANSPORT=tcp python3 tools/unitap/unitap.py status`
-
-### File transport
-
-File transport uses:
-
-- `Library/Unitap/file-transport/requests`
-- `Library/Unitap/file-transport/processing`
-- `Library/Unitap/file-transport/responses`
-
-This is intended for environments where TCP localhost access and AF_UNIX socket connect are both restricted, such as heavily sandboxed automation clients.
 
 ## License
 

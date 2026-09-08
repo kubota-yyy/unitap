@@ -19,6 +19,8 @@ namespace Unitap
     {
         static readonly string JobFilePath = Path.Combine(
             Application.dataPath, "..", "Library", "Unitap", "async-job.json");
+        static readonly string JobHistoryFilePath = Path.Combine(
+            Application.dataPath, "..", "Library", "Unitap", "async-job-history.jsonl");
 
         // Unity compiler error pattern: Assets/path/file.cs(line,col): error CS0001: message
         static readonly Regex CompilerMessagePattern = new(
@@ -64,6 +66,7 @@ namespace Unitap
             };
             _lastPollTime = EditorApplication.timeSinceStartup;
             Save();
+            AppendHistory("started", success: true, timedOut: false);
             EditorApplication.update -= Poll;
             EditorApplication.update += Poll;
             return _current.jobId;
@@ -248,6 +251,7 @@ namespace Unitap
             _current.status = "completed";
             _current.result = JObject.FromObject(result);
             Save();
+            AppendHistory("completed", success: !timedOut, timedOut: timedOut);
         }
 
         struct ErrorItem
@@ -340,6 +344,69 @@ namespace Unitap
             catch (Exception ex)
             {
                 Debug.LogWarning($"[Unitap] AsyncJob save error: {ex.Message}");
+            }
+        }
+
+        static void AppendHistory(string phase, bool success, bool timedOut)
+        {
+            if (_current == null) return;
+            try
+            {
+                var dir = Path.GetDirectoryName(JobHistoryFilePath);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+                var completedAtUtc = DateTime.UtcNow.ToString("O");
+                long? elapsedMs = null;
+                try
+                {
+                    var started = DateTime.Parse(_current.startedAtUtc, null,
+                        System.Globalization.DateTimeStyles.RoundtripKind);
+                    elapsedMs = (long)(DateTime.UtcNow - started).TotalMilliseconds;
+                }
+                catch
+                {
+                    elapsedMs = null;
+                }
+
+                object resultSummary = null;
+                if (_current.result != null)
+                {
+                    resultSummary = new
+                    {
+                        status = _current.result["status"]?.ToString(),
+                        compiled = _current.result["compiled"]?.ToObject<bool?>(),
+                        hasErrors = _current.result["hasErrors"]?.ToObject<bool?>(),
+                        errorCount = _current.result["errorCount"]?.ToObject<int?>(),
+                        warningCount = _current.result["warningCount"]?.ToObject<int?>(),
+                        timedOut = _current.result["timedOut"]?.ToObject<bool?>(),
+                    };
+                }
+
+                var payload = new
+                {
+                    source = "unitap_async_job",
+                    timestamp = completedAtUtc,
+                    phase,
+                    jobId = _current.jobId,
+                    command = _current.command,
+                    status = _current.status,
+                    startedAtUtc = _current.startedAtUtc,
+                    completedAtUtc,
+                    success,
+                    timedOut,
+                    timeoutMs = _current.timeoutMs,
+                    compileStarted = _current.compileStarted,
+                    compileStartObservedAtMs = _current.compileStartObservedAtMs,
+                    elapsedMs,
+                    resultSummary
+                };
+
+                File.AppendAllText(JobHistoryFilePath,
+                    JsonConvert.SerializeObject(payload) + "\n");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogWarning($"[Unitap] AsyncJob history save error: {ex.Message}");
             }
         }
 

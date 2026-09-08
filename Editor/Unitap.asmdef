@@ -1,7 +1,9 @@
 {
     "name": "Unitap",
     "rootNamespace": "Unitap",
-    "references": [],
+    "references": [
+        "Unity.ugui"
+    ],
     "includePlatforms": [
         "Editor"
     ],

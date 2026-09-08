@@ -49,7 +49,7 @@ namespace Unitap.Tools
                         enterChildren = false;
                         if (sp.propertyType == SerializedPropertyType.ObjectReference)
                         {
-                            if (sp.objectReferenceValue == null && sp.objectReferenceInstanceIDValue != 0)
+                            if (sp.objectReferenceValue == null && sp.objectReferenceEntityIdValue != default(EntityId))
                             {
                                 missingReferences.Add(new
                                 {

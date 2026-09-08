@@ -117,12 +117,12 @@ namespace Unitap.Tools
                     if (prop.objectReferenceValue != null)
                         return new
                         {
-                            instanceId = prop.objectReferenceValue.GetInstanceID(),
+                            instanceId = EntityId.ToULong(prop.objectReferenceValue.GetEntityId()),
                             name = prop.objectReferenceValue.name,
                             type = prop.objectReferenceValue.GetType().Name
                         };
-                    return prop.objectReferenceInstanceIDValue != 0
-                        ? (object)new { missing = true, instanceId = prop.objectReferenceInstanceIDValue }
+                    return prop.objectReferenceEntityIdValue != default(EntityId)
+                        ? (object)new { missing = true, instanceId = EntityId.ToULong(prop.objectReferenceEntityIdValue) }
                         : null;
                 case SerializedPropertyType.LayerMask:
                     return prop.intValue;

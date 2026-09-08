@@ -1,13 +1,13 @@
-using System;
-using System.IO;
 using UnityEditor;
 using UnityEngine;
+using System;
+using System.Collections.Generic;
 
 namespace Unitap
 {
     /// <summary>
     /// Unitap のエントリポイント。InitializeOnLoadで自動起動。
-    /// TCP Host / Heartbeat / ConsoleCapture / Dispatcher を統合管理する。
+    /// Host / Heartbeat / ConsoleCapture / Dispatcher を統合管理する。
     /// </summary>
     [InitializeOnLoad]
     public static class UnitapEntry
@@ -15,9 +15,7 @@ namespace Unitap
         const int HostStartRetryMax = 5;
         const double HostStartRetryIntervalSeconds = 1.0;
 
-        static UnitapTcpHost _tcpHost;
-        static UnitapPipeHost _pipeHost;
-        static UnitapFileHost _fileHost;
+        static IUnitapHost _host;
         static UnitapHeartbeat _heartbeat;
         static UnitapConsoleCapture _console;
         static UnitapDispatcher _dispatcher;
@@ -25,6 +23,8 @@ namespace Unitap
         static double _nextHostStartRetryAt;
 
         public static UnitapConsoleCapture Console => _console;
+        public static UnitapTransportInfo TransportInfo => _host?.TransportInfo;
+        public static int QueueDepth => _host?.QueueDepth ?? 0;
 
         static UnitapEntry()
         {
@@ -52,44 +52,17 @@ namespace Unitap
         static void Initialize()
         {
             Shutdown(deleteHeartbeat: false); // 既存インスタンスを破棄（heartbeatファイルは残す）
-            EnsurePidFile();
 
             _console = new UnitapConsoleCapture();
             _console.Start();
 
-            _tcpHost = new UnitapTcpHost();
-            var tcpStarted = _tcpHost.Start();
-            if (!tcpStarted)
-            {
-                var reason = string.IsNullOrEmpty(_tcpHost.LastStartError) ? "unknown" : _tcpHost.LastStartError;
-                Debug.LogWarning($"[Unitap] Failed to start TCP host ({_hostStartRetryCount + 1}/{HostStartRetryMax}): {reason}");
-                _tcpHost.Dispose();
-                _tcpHost = null;
-            }
-
-            _pipeHost = new UnitapPipeHost();
-            var pipeStarted = _pipeHost.Start();
-            if (!pipeStarted)
-            {
-                var reason = string.IsNullOrEmpty(_pipeHost.LastStartError) ? "unknown" : _pipeHost.LastStartError;
-                Debug.LogWarning($"[Unitap] Failed to start pipe host ({reason})");
-                _pipeHost.Dispose();
-                _pipeHost = null;
-            }
-
-            _fileHost = new UnitapFileHost();
-            var fileStarted = _fileHost.Start();
-            if (!fileStarted)
-            {
-                var reason = string.IsNullOrEmpty(_fileHost.LastStartError) ? "unknown" : _fileHost.LastStartError;
-                Debug.LogWarning($"[Unitap] Failed to start file host ({reason})");
-                _fileHost.Dispose();
-                _fileHost = null;
-            }
-
-            if (!tcpStarted && !pipeStarted && !fileStarted)
+            if (!TryStartHost(out _host, out var hostStartError))
             {
                 _hostStartRetryCount++;
+                var reason = string.IsNullOrEmpty(hostStartError) ? "unknown" : hostStartError;
+                Debug.LogWarning($"[Unitap] Failed to start Unitap host ({_hostStartRetryCount}/{HostStartRetryMax}): {reason}");
+
+                _host = null;
                 _console?.Dispose();
                 _console = null;
 
@@ -101,15 +74,14 @@ namespace Unitap
                 }
                 else
                 {
-                    Debug.LogError("[Unitap] Failed to start Unitap hosts after retries");
+                    Debug.LogError("[Unitap] Failed to start Unitap host after retries");
                 }
                 return;
             }
-
             _hostStartRetryCount = 0;
 
             _heartbeat = new UnitapHeartbeat();
-            _heartbeat.Start(_tcpHost?.BoundPort ?? 0, _pipeHost?.PipeName, _fileHost?.RootDirectory);
+            _heartbeat.Start(_host.TransportInfo);
 
             _dispatcher = new UnitapDispatcher();
             _dispatcher.Init();
@@ -128,10 +100,92 @@ namespace Unitap
             AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
 
-            var tcpInfo = _tcpHost != null ? $"tcp:{_tcpHost.BoundPort}" : "tcp:off";
-            var pipeInfo = _pipeHost != null ? $"pipe:{_pipeHost.PipeName}" : "pipe:off";
-            var fileInfo = _fileHost != null ? $"file:{_fileHost.RootDirectory}" : "file:off";
-            Debug.Log($"[Unitap] Started ({tcpInfo}, {pipeInfo}, {fileInfo})");
+            var transport = _host.TransportInfo;
+            var endpoint = transport?.Kind == "tcp"
+                ? $"{transport.Host}:{transport.Port}"
+                : transport?.Kind == "pipe"
+                    ? transport.PipeName
+                    : transport?.FileTransportDirectory;
+            Debug.Log($"[Unitap] Started via {transport?.Kind ?? "unknown"} ({endpoint})");
+        }
+
+        static bool TryStartHost(out IUnitapHost host, out string errorSummary)
+        {
+            host = null;
+            var errors = new List<string>();
+
+            foreach (var candidate in CreateHostCandidates())
+            {
+                if (candidate.Start())
+                {
+                    host = candidate;
+                    errorSummary = null;
+                    return true;
+                }
+
+                var candidateError = string.IsNullOrEmpty(candidate.LastStartError) ? "unknown" : candidate.LastStartError;
+                errors.Add($"{candidate.GetType().Name}: {candidateError}");
+                candidate.Dispose();
+            }
+
+            errorSummary = string.Join(" | ", errors);
+            return false;
+        }
+
+        static IEnumerable<IUnitapHost> CreateHostCandidates()
+        {
+            foreach (var transportKind in EnumerateTransportKinds())
+            {
+                switch (transportKind)
+                {
+                    case "file":
+                        yield return new UnitapFileHost();
+                        break;
+                    case "pipe":
+                        yield return new UnitapPipeHost();
+                        break;
+                    default:
+                        yield return new UnitapTcpHost();
+                        break;
+                }
+            }
+        }
+
+        static IEnumerable<string> EnumerateTransportKinds()
+        {
+            var emitted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var rawPreference = Environment.GetEnvironmentVariable("UNITAP_TRANSPORT_PREFERENCE");
+
+            foreach (var transportKind in ParseTransportPreference(rawPreference))
+            {
+                if (emitted.Add(transportKind))
+                    yield return transportKind;
+            }
+
+            foreach (var fallbackKind in new[] { "file", "pipe", "tcp" })
+            {
+                if (emitted.Add(fallbackKind))
+                    yield return fallbackKind;
+            }
+        }
+
+        static IEnumerable<string> ParseTransportPreference(string rawPreference)
+        {
+            if (string.IsNullOrWhiteSpace(rawPreference))
+                yield break;
+
+            foreach (var token in rawPreference.Split(','))
+            {
+                var transportKind = token?.Trim().ToLowerInvariant();
+                switch (transportKind)
+                {
+                    case "file":
+                    case "pipe":
+                    case "tcp":
+                        yield return transportKind;
+                        break;
+                }
+            }
         }
 
         static void RegisterCommands()
@@ -141,6 +195,7 @@ namespace Unitap
             _dispatcher.RegisterCommand("stop", new Commands.StopCommand());
             _dispatcher.RegisterCommand("execute_menu", new Commands.ExecuteMenuCommand());
             _dispatcher.RegisterCommand("refresh", new Commands.RefreshCommand());
+            _dispatcher.RegisterCommand("reimport", new Commands.ReimportCommand());
             _dispatcher.RegisterCommand("wait_idle", new Commands.WaitIdleCommand());
             _dispatcher.RegisterCommand("read_console", new Commands.ReadConsoleCommand());
             _dispatcher.RegisterCommand("clear_console", new Commands.ClearConsoleCommand());
@@ -157,18 +212,12 @@ namespace Unitap
 
         static void Tick()
         {
-            if ((_tcpHost == null || !_tcpHost.IsRunning) &&
-                (_pipeHost == null || !_pipeHost.IsRunning) &&
-                (_fileHost == null || !_fileHost.IsRunning)) return;
+            if (_host == null || !_host.IsRunning) return;
             _heartbeat?.Tick();
-            _dispatcher?.ProcessQueue(_tcpHost, _pipeHost, _fileHost);
+            _dispatcher?.ProcessQueue(_host);
         }
 
-        static void OnQuitting()
-        {
-            Shutdown(deleteHeartbeat: true);
-            DeletePidFile();
-        }
+        static void OnQuitting() => Shutdown(deleteHeartbeat: true);
         static void OnBeforeAssemblyReload()
         {
             _heartbeat?.WriteReloading();
@@ -179,15 +228,11 @@ namespace Unitap
         {
             EditorApplication.update -= Tick;
             EditorApplication.update -= RetryInitialize;
-            _tcpHost?.Dispose();
-            _pipeHost?.Dispose();
-            _fileHost?.Dispose();
+            _host?.Dispose();
             _console?.Dispose();
             if (deleteHeartbeat)
                 _heartbeat?.Dispose(); // ファイル削除はエディタ終了時のみ
-            _tcpHost = null;
-            _pipeHost = null;
-            _fileHost = null;
+            _host = null;
             _heartbeat = null;
             _console = null;
             _dispatcher = null;
@@ -202,40 +247,5 @@ namespace Unitap
         /// 直近のエディタ状態を取得 (メインスレッド外での参照用)
         /// </summary>
         public static EditorState GetLastKnownEditorState() => UnitapDispatcher.GetLastKnownEditorState();
-
-        static void EnsurePidFile()
-        {
-            try
-            {
-                var path = UnitapPipeName.GetPidFilePath();
-                var dir = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(dir))
-                {
-                    Directory.CreateDirectory(dir);
-                }
-
-                File.WriteAllText(path, System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning($"[Unitap] Failed to write PID file: {ex.Message}");
-            }
-        }
-
-        static void DeletePidFile()
-        {
-            try
-            {
-                var path = UnitapPipeName.GetPidFilePath();
-                if (File.Exists(path))
-                {
-                    File.Delete(path);
-                }
-            }
-            catch
-            {
-                // ignore
-            }
-        }
     }
 }

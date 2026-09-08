@@ -7,6 +7,7 @@ using UnityEditor;
 using UnityEditor.SceneManagement;
 using UnityEngine;
 using Unitap.Commands;
+using Stopwatch = System.Diagnostics.Stopwatch;
 
 namespace Unitap
 {
@@ -38,7 +39,7 @@ namespace Unitap
         /// <summary>
         /// メインスレッドから呼ばれる。キューから取り出して実行。
         /// </summary>
-        public void ProcessQueue(params IUnitapHost[] hosts)
+        public void ProcessQueue(IUnitapHost host)
         {
             // 5分ごとに古い idempotency key をパージ
             var now = EditorApplication.timeSinceStartup;
@@ -50,65 +51,68 @@ namespace Unitap
 
             // 1フレームで最大8件処理 (UIフリーズ防止)
             int processed = 0;
-            if (hosts == null)
+            while (processed < 8 && host.TryDequeue(out var pending))
             {
-                return;
-            }
+                processed++;
+                var req = pending.Request;
+                UnitapResponse resp;
 
-            foreach (var host in hosts)
-            {
-                if (host == null)
+                if (pending.Abandoned)
                 {
+                    WriteJournal(req.IdempotencyKey, "abandoned", req.Command);
                     continue;
                 }
 
-                while (processed < 8 && host.TryDequeue(out var pending))
+                var sw = Stopwatch.StartNew();
+                try
                 {
-                    processed++;
-                    var req = pending.Request;
-                    UnitapResponse resp;
-
-                    try
+                    // idempotencyKey 重複チェック
+                    if (!string.IsNullOrEmpty(req.IdempotencyKey) && _processedKeys.TryGetValue(req.IdempotencyKey, out _))
                     {
-                        // idempotencyKey 重複チェック
-                        if (!string.IsNullOrEmpty(req.IdempotencyKey) && _processedKeys.TryGetValue(req.IdempotencyKey, out _))
-                        {
-                            resp = MakeOk(req.RequestId, new { duplicate = true, message = "Already processed" });
-                            pending.Respond(resp);
-                            continue;
-                        }
-
-                        if (!_commands.TryGetValue(req.Command, out var cmd))
-                        {
-                            resp = MakeError(req.RequestId, "unknown_command", $"Unknown command: {req.Command}");
-                            pending.Respond(resp);
-                            continue;
-                        }
-
-                        WriteJournal(req.IdempotencyKey, "received", req.Command);
-                        var result = cmd.Execute(req);
-
-                        if (!string.IsNullOrEmpty(req.IdempotencyKey))
-                        {
-                            _processedKeys.TryAdd(req.IdempotencyKey, DateTime.UtcNow);
-                        }
-
-                        WriteJournal(req.IdempotencyKey, "completed", req.Command);
-                        resp = MakeOk(req.RequestId, result);
-                    }
-                    catch (Exception ex)
-                    {
-                        Debug.LogError($"[Unitap] Command '{req.Command}' error: {ex}");
-                        resp = MakeError(req.RequestId, "execution_error", ex.Message);
+                        sw.Stop();
+                        resp = MakeOk(req.RequestId, new { duplicate = true, message = "Already processed" }, sw.ElapsedMilliseconds);
+                        pending.Respond(resp);
+                        continue;
                     }
 
-                    pending.Respond(resp);
+                    if (!_commands.TryGetValue(req.Command, out var cmd))
+                    {
+                        sw.Stop();
+                        resp = MakeError(req.RequestId, "unknown_command", $"Unknown command: {req.Command}", sw.ElapsedMilliseconds);
+                        pending.Respond(resp);
+                        continue;
+                    }
+
+                    // ジャーナル記録: received
+                    WriteJournal(req.IdempotencyKey, "received", req.Command);
+
+                    // コマンド実行
+                    var result = cmd.Execute(req);
+
+                    // idempotencyKey 記録
+                    if (!string.IsNullOrEmpty(req.IdempotencyKey))
+                        _processedKeys.TryAdd(req.IdempotencyKey, DateTime.UtcNow);
+
+                    // ジャーナル記録: completed
+                    WriteJournal(req.IdempotencyKey, "completed", req.Command);
+
+                    sw.Stop();
+                    resp = MakeOk(req.RequestId, result, sw.ElapsedMilliseconds);
+                }
+                catch (UnitapCommandException cmdEx)
+                {
+                    sw.Stop();
+                    Debug.LogError($"[Unitap] Command '{req.Command}' [{cmdEx.Code}]: {cmdEx.Message}");
+                    resp = MakeError(req.RequestId, cmdEx.Code, cmdEx.Message, sw.ElapsedMilliseconds, cmdEx.Details);
+                }
+                catch (Exception ex)
+                {
+                    sw.Stop();
+                    Debug.LogError($"[Unitap] Command '{req.Command}' error: {ex}");
+                    resp = MakeError(req.RequestId, "execution_error", ex.Message, sw.ElapsedMilliseconds);
                 }
 
-                if (processed >= 8)
-                {
-                    break;
-                }
+                pending.Respond(resp);
             }
         }
 
@@ -140,27 +144,40 @@ namespace Unitap
             };
         }
 
-        UnitapResponse MakeOk(string requestId, object result)
+        UnitapResponse MakeOk(string requestId, object result, long processingTimeMs = 0)
         {
+            // result が JObject の場合、_unitap_warnings を抽出してレスポンスに付与
+            string[] warnings = null;
+            if (result is Newtonsoft.Json.Linq.JObject jObj && jObj.TryGetValue("_unitap_warnings", out var warnToken))
+            {
+                warnings = warnToken.ToObject<string[]>();
+                jObj.Remove("_unitap_warnings");
+            }
+
             return new UnitapResponse
             {
                 RequestId = requestId,
                 Ok = true,
                 Result = result,
                 Editor = GetEditorState(),
-                CompletedAtUtc = DateTime.UtcNow.ToString("O")
+                CompletedAtUtc = DateTime.UtcNow.ToString("O"),
+                ProcessingTimeMs = processingTimeMs,
+                TransportKind = UnitapEntry.TransportInfo?.Kind,
+                Warnings = warnings
             };
         }
 
-        UnitapResponse MakeError(string requestId, string code, string message)
+        UnitapResponse MakeError(string requestId, string code, string message, long processingTimeMs = 0, object details = null)
         {
             return new UnitapResponse
             {
                 RequestId = requestId,
                 Ok = false,
-                Error = new UnitapError { Code = code, Message = message },
+                Error = new UnitapError { Code = code, Message = message, Details = details },
                 Editor = GetEditorState(),
-                CompletedAtUtc = DateTime.UtcNow.ToString("O")
+                CompletedAtUtc = DateTime.UtcNow.ToString("O"),
+                ProcessingTimeMs = processingTimeMs,
+                TransportKind = UnitapEntry.TransportInfo?.Kind
             };
         }
 
@@ -189,7 +206,8 @@ namespace Unitap
 
         void WriteJournal(string idempotencyKey, string phase, string command)
         {
-            if (string.IsNullOrEmpty(idempotencyKey) || _journalPath == null) return;
+            if (_journalPath == null) return;
+            if (string.IsNullOrEmpty(idempotencyKey) && phase != "abandoned") return;
             try
             {
                 var entry = JsonConvert.SerializeObject(new

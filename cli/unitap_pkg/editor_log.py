@@ -243,6 +243,34 @@ def parse_editor_log_snapshot(project_path: str | None = None) -> dict | None:
     }
 
 
+def parse_project_editor_log_snapshot(project_path: str | None = None) -> dict | None:
+    snapshot = parse_editor_log_snapshot(project_path)
+    if snapshot is None:
+        return None
+
+    project_root = find_project_root(project_path)
+    if not _snapshot_matches_project(snapshot, project_root):
+        return None
+
+    return snapshot
+
+
+def summarize_editor_activity_snapshot(snapshot: dict | None) -> dict | None:
+    if not isinstance(snapshot, dict):
+        return None
+
+    return {
+        "logPath": snapshot.get("logPath"),
+        "logAgeSeconds": snapshot.get("logAgeSeconds"),
+        "recentActivity": _is_recent_snapshot(snapshot),
+        "sessionState": snapshot.get("sessionState", "unknown"),
+        "isCompiling": bool(snapshot.get("isCompiling", False)),
+        "hasErrors": bool(snapshot.get("hasErrors", False)),
+        "errorCount": int(snapshot.get("errorCount", 0) or 0),
+        "warningCount": int(snapshot.get("warningCount", 0) or 0),
+    }
+
+
 def format_compile_entry_message(entry: dict) -> str:
     location = ""
     if entry.get("file"):
@@ -299,6 +327,10 @@ def _fallback_heartbeat(args, snapshot: dict) -> bool:
         "errorCount": snapshot.get("errorCount", 0), "fresh": False,
         **_fallback_source(snapshot),
     }
+    errors = snapshot.get("errors", [])
+    if errors:
+        hb["compileErrors"] = _format_error_list(errors)
+        hb["compileErrorCount"] = len(errors)
     print(json.dumps(hb, indent=2, ensure_ascii=False))
     sys.exit(1)
 
@@ -433,6 +465,26 @@ def _is_recent_snapshot(snapshot: dict) -> bool:
     return age <= EDITOR_LOG_MAX_AGE_SECONDS
 
 
+def _is_stale_failed_snapshot_for_running_editor(snapshot: dict, project_root: Path | None) -> bool:
+    if snapshot.get("sessionState") != "failed":
+        return False
+    if snapshot.get("errorCount", 0) <= 0:
+        return False
+
+    running_for_project = list_unity_processes(project_root)
+    if len(running_for_project) != 1:
+        return False
+
+    running_any = list_unity_processes()
+    if len(running_any) != 1:
+        return False
+
+    if project_root is None:
+        return True
+
+    return _is_same_path(running_any[0].get("projectPath"), project_root)
+
+
 def _is_same_path(a: str | Path | None, b: str | Path | None) -> bool:
     na = _normalize_path(a)
     nb = _normalize_path(b)
@@ -476,6 +528,14 @@ def _snapshot_matches_project(snapshot: dict, project_root: Path | None) -> bool
     return False
 
 
+def summarize_project_editor_activity(project_path: str | None = None) -> dict | None:
+    snapshot = parse_project_editor_log_snapshot(project_path)
+    if snapshot is None:
+        return None
+
+    return summarize_editor_activity_snapshot(snapshot)
+
+
 _FALLBACK_HANDLERS: dict[str, callable] = {
     "heartbeat": _fallback_heartbeat,
     "status": _fallback_status,
@@ -496,10 +556,10 @@ def try_editor_log_fallback(args, reason: str) -> bool:
     if snapshot is None:
         return False
 
-    if not _is_recent_snapshot(snapshot):
+    project_root = find_project_root(args.project)
+    if not _is_recent_snapshot(snapshot) and not _is_stale_failed_snapshot_for_running_editor(snapshot, project_root):
         return False
 
-    project_root = find_project_root(args.project)
     if not _snapshot_matches_project(snapshot, project_root):
         return False
 

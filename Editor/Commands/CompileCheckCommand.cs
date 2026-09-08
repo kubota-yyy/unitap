@@ -1,4 +1,3 @@
-using System.Collections.Generic;
 using UnityEditor;
 using UnityEditor.Compilation;
 
@@ -16,21 +15,8 @@ namespace Unitap.Commands
             // PlayMode中はコンパイルチェック不可（CLI側で自動stop→リトライする）
             if (EditorApplication.isPlaying)
             {
-                return new
-                {
-                    compiled = false,
-                    hasErrors = true,
-                    errors = new[] { new { file = "", line = 0, column = 0, code = "PLAY_MODE",
-                        message = "Cannot compile check while in Play mode. Stop Play mode first." } },
-                    warnings = new List<object>(),
-                    errorCount = 1,
-                    warningCount = 0,
-                    elapsedMs = 0L,
-                    timedOut = false,
-                    compileStarted = false,
-                    compileStartObservedAtMs = (long?)null,
-                    isPlaying = true
-                };
+                throw new UnitapCommandException("precondition_failed",
+                    "Cannot compile check while in Play mode. Stop Play mode first.");
             }
 
             // 既にジョブ実行中なら既存のjobIdを返す

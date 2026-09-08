@@ -13,6 +13,7 @@ EDITOR_OPERATION_METADATA_NAME = ".editor-op.json"
 EDITOR_OPERATION_POLL_SECONDS = 0.2
 
 LOCKED_COMMANDS = {
+    "unicli",
     "capture",
     "capture_editor",
     "compile_check",
@@ -21,6 +22,7 @@ LOCKED_COMMANDS = {
     "play",
     "redo",
     "refresh",
+    "reimport",
     "run_automate_batch",
     "run_automate_test",
     "run_playmode_test",
@@ -41,6 +43,9 @@ UNLOCKED_COMMANDS = {
 LOCKED_TOOL_NAMES = {
     "capture_editor_window",
     "capture_gameview",
+    "capture_gacha_publish_items",
+    "capture_interior_all_asset_versions",
+    "capture_interior_all_sbmaster",
     "capture_sceneview",
     "open_scene",
     "run_automate_test",
@@ -69,6 +74,9 @@ class EditorOperationBusyError(Exception):
 def command_requires_editor_lock(args) -> bool:
     command = str(getattr(args, "command", "") or "")
     if command in UNLOCKED_COMMANDS:
+        return False
+    if command == "run_playmode_test":
+        # PlayMode の待機中は lock を保持せず、開始/clear の瞬間だけ個別に lock する。
         return False
     if command in LOCKED_COMMANDS:
         return True
@@ -254,6 +262,47 @@ def enrich_diagnose_result_with_editor_lock(project_root: Path | None, result: d
 
     enriched = dict(result)
     enriched["editorOperationLock"] = snapshot
+
+    issues = list(enriched.get("issues") or [])
+    next_actions = list(enriched.get("next_actions") or [])
+    holder = snapshot.get("holder") or {}
+
+    if snapshot.get("held"):
+        command = holder.get("command") or "unknown"
+        pid = holder.get("pid")
+        issue = {
+            "issue": "editor_operation_locked",
+            "detail": (
+                f"Unitap editor operation lock is held by PID {pid} ({command}). "
+                "排他コマンドは待機または editor_busy になります。"
+            ),
+            "next_actions": ["status", "heartbeat"],
+        }
+        issues.append(issue)
+        for action in issue["next_actions"]:
+            if action not in next_actions:
+                next_actions.append(action)
+    elif snapshot.get("metadataStale"):
+        command = holder.get("command") or "unknown"
+        pid = holder.get("pid")
+        issue = {
+            "issue": "editor_operation_lock_metadata_stale",
+            "detail": (
+                f"Unitap editor operation lock metadata remains for PID {pid} ({command}) "
+                "but the file lock is not held."
+            ),
+            "next_actions": ["status"],
+        }
+        issues.append(issue)
+        for action in issue["next_actions"]:
+            if action not in next_actions:
+                next_actions.append(action)
+
+    if issues:
+        enriched["issues"] = issues
+        enriched["next_actions"] = next_actions
+        enriched["status"] = "issues_found"
+        enriched["detail"] = f"{len(issues)} issue(s) detected"
     return enriched
 
 

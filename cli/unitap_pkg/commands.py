@@ -1,26 +1,36 @@
 import json
 import os
+import socket
 import sys
 import time
 
-from .constants import CONNECTION_RETRY_INTERVAL, DEFAULT_TIMEOUT_MS
+from .constants import (
+    CONNECTION_RETRY_INTERVAL,
+    CONNECTION_RETRY_MAX,
+    DEFAULT_TIMEOUT_MS,
+    POLL_INTERVAL,
+)
 from .editor_lock import enrich_diagnose_result_with_editor_lock
-from .editor_log import find_project_root, read_compile_errors
+from .editor_log import find_project_root, read_compile_errors, summarize_project_editor_activity
 from .heartbeat import find_heartbeat, check_heartbeat_fresh
 from .image_quality import inspect_capture_image
+from .runtime_diagnostics import classify_unity_unavailability
 from .transport import (
     build_request,
     extract_wait_idle_state,
     poll_async_job,
-    send_request,
+    send_request_to_current_transport,
     send_with_retry,
     wait_for_connection,
 )
 from .unity import (
+    build_unity_launch_environment,
     build_unity_launch_command,
     clean_recovery_files,
+    dismiss_safe_mode_dialog_async,
     focus_unity_editor,
     get_unity_editor_path,
+    get_expected_build_target,
     get_unity_version,
     is_unity_process_running,
     kill_unity_processes,
@@ -42,14 +52,18 @@ def send_unitap_sync(args, port: int, command: str, params: dict, timeout_ms: in
 
 
 def print_unitap_response(args, resp: dict) -> None:
+    setattr(args, "_last_unitap_response", resp)
     if resp.get("ok"):
         result = resp.get("result", {})
         if isinstance(result, dict):
             resp = dict(resp)
             resp["result"] = merge_wait_meta_into_result(args, result)
+            setattr(args, "_last_unitap_response", resp)
 
     if args.json:
         print(json.dumps(resp, indent=2, ensure_ascii=False))
+        if not resp.get("ok"):
+            sys.exit(1)
         return
 
     if resp.get("ok"):
@@ -59,7 +73,26 @@ def print_unitap_response(args, resp: dict) -> None:
 
     err = resp.get("error", {})
     print(f"Error [{err.get('code', 'unknown')}]: {err.get('message', 'unknown error')}", file=sys.stderr)
+    details = err.get("details") if isinstance(err, dict) else None
+    if isinstance(details, dict):
+        suggestions = details.get("didYouMean")
+        if isinstance(suggestions, list) and suggestions:
+            print(f"  did you mean: {', '.join(str(s) for s in suggestions)}", file=sys.stderr)
+        hint = details.get("hint")
+        if isinstance(hint, str) and hint:
+            print(f"  hint: {hint}", file=sys.stderr)
     sys.exit(1)
+
+
+def merge_transport_fields(payload: dict, heartbeat: dict | None) -> dict:
+    if not isinstance(payload, dict) or not isinstance(heartbeat, dict):
+        return payload
+
+    merged = dict(payload)
+    for key in ("transportKind", "host", "port", "pipeName", "pipeSocketPath", "fileTransportDirectory"):
+        if key not in merged and heartbeat.get(key) is not None:
+            merged[key] = heartbeat.get(key)
+    return merged
 
 
 def merge_wait_meta_into_result(args, result):
@@ -86,50 +119,72 @@ def _format_processes(processes: list[dict], limit: int = 5) -> list[dict]:
     return output
 
 
+def _build_unavailability_payload(project_path: str | None, process_running: bool, *, state: str | None = None) -> dict:
+    diagnosis = classify_unity_unavailability(
+        process_running,
+        summarize_project_editor_activity(project_path),
+        state=state,
+    )
+    payload = {
+        "ok": False,
+        "error": {
+            "code": diagnosis["code"],
+            "message": diagnosis["message"],
+        },
+    }
+    details = dict(diagnosis.get("details") or {})
+    if project_path:
+        details.setdefault("projectPath", project_path)
+    if details:
+        payload["error"]["details"] = details
+    return payload
+
+
 def do_launch(args) -> None:
     """Unity Editor を起動する"""
     import subprocess
 
+    def emit(payload: dict, *, exit_code: int | None = None) -> None:
+        setattr(args, "_last_unitap_response", payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        if exit_code is not None:
+            sys.exit(exit_code)
+
     project_root = find_project_root(args.project)
     if not project_root:
-        print(json.dumps({"ok": False, "error": "Unity project not found"}, indent=2))
-        sys.exit(1)
+        emit({"ok": False, "error": {"code": "project_not_found", "message": "Unity project not found"}}, exit_code=1)
 
     # 1. Unity バージョン取得
     version = get_unity_version(project_root)
     if not version:
-        print(json.dumps({"ok": False, "error": "ProjectVersion.txt not found or invalid"}, indent=2))
-        sys.exit(1)
+        emit(
+            {"ok": False, "error": {"code": "invalid_project_version", "message": "ProjectVersion.txt not found or invalid"}},
+            exit_code=1,
+        )
 
     # 2. Editor パス確認
     editor_path = get_unity_editor_path(version)
     if not editor_path:
         installed = list_installed_unity_versions()
-        print(json.dumps({
+        emit({
             "ok": False,
-            "error": f"Unity {version} is not installed",
+            "error": {"code": "unity_not_installed", "message": f"Unity {version} is not installed"},
             "installedVersions": installed,
-        }, indent=2))
-        sys.exit(1)
+        }, exit_code=1)
 
     if args.restart and args.no_kill:
-        print(json.dumps({
+        emit({
             "ok": False,
-            "error": "--restart and --no-kill cannot be used together.",
+            "error": {"code": "invalid_launch_args", "message": "--restart and --no-kill cannot be used together."},
             "projectPath": str(project_root),
-        }, indent=2))
-        sys.exit(1)
+        }, exit_code=1)
 
     running_same_project = list_unity_processes(project_root)
     running_any = list_unity_processes()
 
     if running_same_project and not args.restart:
         hb = find_heartbeat(args.project)
-        connected = bool(
-            hb
-            and check_heartbeat_fresh(hb)
-            and (hb.get("port") or hb.get("pipeName"))
-        )
+        connected = bool(hb and check_heartbeat_fresh(hb))
         if not connected and not args.no_wait:
             timeout_s = args.wait_timeout
             max_retries = max(timeout_s // CONNECTION_RETRY_INTERVAL, 1)
@@ -148,28 +203,31 @@ def do_launch(args) -> None:
         }
         if hb and hb.get("port"):
             payload["port"] = hb.get("port")
-        if hb and hb.get("pipeName"):
-            payload["pipeName"] = hb.get("pipeName")
-        print(json.dumps(payload, indent=2))
+        payload = merge_transport_fields(payload, hb)
+        emit(payload)
         return
 
     if running_any and not args.restart:
-        print(json.dumps({
+        emit({
             "ok": False,
-            "error": "Another Unity instance is already running. Launch aborted to prevent multiple Unity instances.",
+            "error": {
+                "code": "unity_already_running",
+                "message": "Another Unity instance is already running. Launch aborted to prevent multiple Unity instances.",
+            },
             "projectPath": str(project_root),
             "runningProcesses": _format_processes(running_any),
-        }, indent=2))
-        sys.exit(1)
+        }, exit_code=1)
 
     if args.no_kill and running_any:
-        print(json.dumps({
+        emit({
             "ok": False,
-            "error": "--no-kill cannot be used while a Unity process is already running.",
+            "error": {
+                "code": "invalid_launch_args",
+                "message": "--no-kill cannot be used while a Unity process is already running.",
+            },
             "projectPath": str(project_root),
             "runningProcesses": _format_processes(running_any),
-        }, indent=2))
-        sys.exit(1)
+        }, exit_code=1)
 
     # 3. バックアップ削除（Recovery Scene Backups ダイアログ防止）
     removed = clean_recovery_files(project_root)
@@ -182,13 +240,15 @@ def do_launch(args) -> None:
             print(f"Killed Unity processes: {killed}", file=sys.stderr)
             time.sleep(2)
         if is_unity_process_running():
-            print(json.dumps({
+            emit({
                 "ok": False,
-                "error": "Failed to terminate existing Unity process. Launch aborted to avoid multiple Unity instances.",
+                "error": {
+                    "code": "unity_kill_failed",
+                    "message": "Failed to terminate existing Unity process. Launch aborted to avoid multiple Unity instances.",
+                },
                 "projectPath": str(project_root),
                 "runningProcesses": _format_processes(list_unity_processes()),
-            }, indent=2))
-            sys.exit(1)
+            }, exit_code=1)
 
     # 5. kill 後にも再掃除（ロック解放後に残るバックアップ対策）
     for p in clean_recovery_files(project_root):
@@ -206,29 +266,39 @@ def do_launch(args) -> None:
             pass
 
     # 7. Unity 起動
-    # Restart flows should ignore compile-error dialogs to prevent headless deadlocks.
-    ignore_compiler_errors = bool(args.restart or getattr(args, "ignore_compiler_errors", False))
+    # Unity 6 では -ignoreCompilerErrors だけでは "Enter Safe Mode?" を抑制できない
+    # ケースが残るため、デフォルトで CLI フラグを付与しつつ AppleScript dismisser も併用する。
+    # オプトアウトしたい場合は --no-ignore-compiler-errors を指定する。
+    ignore_compiler_errors = not getattr(args, "no_ignore_compiler_errors", False)
+    expected_build_target = get_expected_build_target(project_root)
     cmd = build_unity_launch_command(
         editor_path,
         project_root,
         ignore_compiler_errors=ignore_compiler_errors,
+        build_target=expected_build_target,
     )
     print(f"Launching Unity {version}...", file=sys.stderr)
     subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=build_unity_launch_environment(),
         start_new_session=True,
     )
 
+    # 7.5 起動時ダイアログ自動処理 (macOS / Accessibility 権限が必要)
+    if ignore_compiler_errors:
+        dismiss_safe_mode_dialog_async(timeout_seconds=120)
+
     # 8. 起動確認待ち
     if args.no_wait:
-        print(json.dumps({
+        emit({
             "ok": True,
             "launched": True,
             "version": version,
             "projectPath": str(project_root),
-        }, indent=2))
+            "expectedBuildTarget": expected_build_target,
+        })
         return
 
     timeout_s = args.wait_timeout
@@ -237,34 +307,65 @@ def do_launch(args) -> None:
     hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True)
 
     if hb:
-        payload = {
+        emit(merge_transport_fields({
             "ok": True,
             "launched": True,
             "connected": True,
             "version": version,
             "projectPath": str(project_root),
             "port": hb.get("port"),
-        }
-        if hb.get("pipeName"):
-            payload["pipeName"] = hb.get("pipeName")
-        print(json.dumps(payload, indent=2))
+            "expectedBuildTarget": expected_build_target,
+        }, hb))
     else:
         # プロセスが存在するかだけ確認
         process_running = is_unity_process_running(project_root)
+        editor_activity = summarize_project_editor_activity(args.project)
+        if process_running and (not editor_activity or editor_activity.get("recentActivity") is not False):
+            emit(merge_transport_fields({
+                "ok": True,
+                "launched": True,
+                "connected": False,
+                "version": version,
+                "projectPath": str(project_root),
+                "processRunning": process_running,
+                "expectedBuildTarget": expected_build_target,
+                "message": "Unity is starting but Unitap is not yet connected. It may still be loading.",
+            }, find_heartbeat(args.project)))
+            return
 
-        print(json.dumps({
-            "ok": True,
-            "launched": True,
-            "connected": False,
-            "version": version,
-            "projectPath": str(project_root),
-            "processRunning": process_running,
-            "message": "Unity is starting but Unitap is not yet connected. It may still be loading.",
-        }, indent=2))
+        payload = _build_unavailability_payload(str(project_root), process_running, state="launch_timeout")
+        payload["version"] = version
+        payload["projectPath"] = str(project_root)
+        payload["launched"] = True
+        payload["connected"] = False
+        payload["processRunning"] = process_running
+        emit(payload, exit_code=1)
 
 
 def do_capture(args, port: int) -> None:
     """capture コマンド: Play mode 自動制御 + ファイルポーリング"""
+
+    def _remove_existing_capture_file(path: str) -> None:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+    def _set_capture_response(ok: bool, payload: dict) -> None:
+        if ok:
+            setattr(args, "_last_unitap_response", {"ok": True, "result": payload})
+            return
+        error = {
+            "code": payload.get("errorCode", "capture_failed"),
+            "message": payload.get("error", "Capture failed"),
+            "details": payload,
+        }
+        setattr(args, "_last_unitap_response", {"ok": False, "error": error})
+
+    def _exit_capture_failure(payload: dict) -> None:
+        _set_capture_response(False, payload)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        sys.exit(1)
 
     def _wait_capture_file_ready(path: str, timeout_seconds: float) -> bool:
         last_size = -1
@@ -309,14 +410,32 @@ def do_capture(args, port: int) -> None:
     params = {"outputPath": output_path, "superSize": args.superSize}
 
     try:
+        _remove_existing_capture_file(output_path)
         resp = _send_capture_with_retry(port, params)
     except Exception as e:
+        setattr(args, "_last_unitap_response", {
+            "ok": False,
+            "error": {
+                "code": "capture_request_failed",
+                "message": str(e),
+            },
+        })
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
     if not resp.get("ok"):
-        err = resp.get("error", {})
-        print(f"Error: {err.get('message', 'unknown error')}", file=sys.stderr)
+        raw_err = resp.get("error", {})
+        err = raw_err if isinstance(raw_err, dict) else {}
+        message = err.get("message", "unknown error")
+        setattr(args, "_last_unitap_response", {
+            "ok": False,
+            "error": {
+                "code": err.get("code", "capture_request_failed"),
+                "message": message,
+                "details": err,
+            },
+        })
+        print(f"Error: {message}", file=sys.stderr)
         sys.exit(1)
 
     result = resp.get("result", {})
@@ -326,43 +445,73 @@ def do_capture(args, port: int) -> None:
         print("Play mode required, starting Play mode...", file=sys.stderr)
         try:
             play_req = build_request("play", {}, 10000, False)
-            send_request("127.0.0.1", port, play_req, timeout_s=15, project_path=args.project)
+            send_request_to_current_transport(
+                args.project,
+                play_req,
+                timeout_s=15,
+                fallback_port=port,
+            )
         except Exception:
             pass
         hb = wait_for_connection(args.project, require_tcp=True)
         if not hb:
+            setattr(args, "_last_unitap_response", {
+                "ok": False,
+                "error": {
+                    "code": "unity_reconnect_failed",
+                    "message": "Unity did not recover after entering Play mode",
+                },
+            })
             print("Error: Unity did not recover after entering Play mode", file=sys.stderr)
             sys.exit(1)
-        port = hb["port"]
+        port = int(hb.get("port", port))
 
         # isPlaying=true を確認してからキャプチャ
         for _ in range(15):
             time.sleep(1)
             try:
                 status_req = build_request("status", {}, 5000)
-                status_resp = send_request("127.0.0.1", port, status_req, timeout_s=5, project_path=args.project)
+                status_resp = send_request_to_current_transport(
+                    args.project,
+                    status_req,
+                    timeout_s=5,
+                    fallback_port=port,
+                )
                 if status_resp.get("ok") and status_resp.get("result", {}).get("isPlaying"):
                     break
             except Exception:
                 pass
 
+        _remove_existing_capture_file(output_path)
         resp = _send_capture_with_retry(port, params)
         if not resp.get("ok"):
-            err = resp.get("error", {})
-            print(f"Error: {err.get('message', 'capture failed')}", file=sys.stderr)
+            raw_err = resp.get("error", {})
+            err = raw_err if isinstance(raw_err, dict) else {}
+            message = err.get("message", "capture failed")
+            setattr(args, "_last_unitap_response", {
+                "ok": False,
+                "error": {
+                    "code": err.get("code", "capture_request_failed"),
+                    "message": message,
+                    "details": err,
+                },
+            })
+            print(f"Error: {message}", file=sys.stderr)
             sys.exit(1)
         result = resp.get("result", {})
 
     if not result.get("requested"):
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        sys.exit(1)
+        result = dict(result)
+        result["errorCode"] = "capture_not_requested"
+        result.setdefault("error", "Capture request was not accepted")
+        _exit_capture_failure(result)
 
     success = _wait_capture_file_ready(output_path, args.timeout)
     out = {"outputPath": output_path, "success": success, "retryCount": 0}
     if not success:
         out["error"] = "File write timeout"
-        print(json.dumps(out, indent=2, ensure_ascii=False))
-        return
+        out["errorCode"] = "capture_file_timeout"
+        _exit_capture_failure(out)
 
     first_quality = inspect_capture_image(output_path)
     out["quality"] = first_quality
@@ -372,29 +521,31 @@ def do_capture(args, port: int) -> None:
         print(f"[unitap] capture anomaly detected: {', '.join(reasons)}. retrying once...", file=sys.stderr)
         time.sleep(0.35)
         try:
+            _remove_existing_capture_file(output_path)
             retry_resp = _send_capture_with_retry(port, params)
         except Exception as ex:
             out["success"] = False
             out["retryCount"] = 1
             out["error"] = f"Retry capture failed: {ex}"
-            print(json.dumps(out, indent=2, ensure_ascii=False))
-            return
+            out["errorCode"] = "capture_retry_failed"
+            _exit_capture_failure(out)
         if not retry_resp.get("ok"):
-            err = retry_resp.get("error", {})
+            raw_err = retry_resp.get("error", {})
+            err = raw_err if isinstance(raw_err, dict) else {}
             out["success"] = False
             out["retryCount"] = 1
             out["error"] = f"Retry capture failed: {err.get('message', 'capture failed')}"
-            print(json.dumps(out, indent=2, ensure_ascii=False))
-            return
+            out["errorCode"] = "capture_retry_failed"
+            _exit_capture_failure(out)
 
         retry_result = retry_resp.get("result", {})
         if not retry_result.get("requested"):
             out["success"] = False
             out["retryCount"] = 1
             out["error"] = "Retry capture request was not accepted"
+            out["errorCode"] = "capture_retry_not_requested"
             out["retryResult"] = retry_result
-            print(json.dumps(out, indent=2, ensure_ascii=False))
-            return
+            _exit_capture_failure(out)
 
         retry_success = _wait_capture_file_ready(output_path, args.timeout)
         out["retryCount"] = 1
@@ -402,8 +553,8 @@ def do_capture(args, port: int) -> None:
         if not retry_success:
             out["success"] = False
             out["error"] = "Retry file write timeout"
-            print(json.dumps(out, indent=2, ensure_ascii=False))
-            return
+            out["errorCode"] = "capture_retry_file_timeout"
+            _exit_capture_failure(out)
 
         final_quality = inspect_capture_image(output_path)
         out["qualityInitial"] = first_quality
@@ -411,8 +562,11 @@ def do_capture(args, port: int) -> None:
         if final_quality.get("ok") and final_quality.get("isAnomaly"):
             out["success"] = False
             out["error"] = "Capture anomaly detected after retry"
+            out["errorCode"] = "capture_anomaly"
             out["anomalyReasons"] = final_quality.get("anomalyReasons")
+            _exit_capture_failure(out)
 
+    _set_capture_response(True, out)
     print(json.dumps(out, indent=2, ensure_ascii=False))
 
 
@@ -487,10 +641,10 @@ def do_wait_idle(args, port: int) -> None:
                 max_retries=reconnect_max_retries,
                 require_tcp=True,
             )
-            if hb and hb.get("port"):
+            if hb:
                 retry_resp = poll_async_job(
                     "127.0.0.1",
-                    int(hb["port"]),
+                    int(hb.get("port", port)),
                     "wait_idle",
                     params,
                     timeout_val,
@@ -841,6 +995,20 @@ def do_compile_check(args, port: int) -> None:
 
     result = _attach_focus_meta(result, focus_attempted, focus_succeeded)
     unresolved_stall_reasons = _compile_stall_reasons(result)
+    if result.get("hasErrors") or int(result.get("errorCount") or 0) > 0:
+        print_unitap_response(
+            args,
+            {
+                "ok": False,
+                "error": {
+                    "code": "compile_errors",
+                    "message": "compile_check completed with compiler errors.",
+                    "details": merge_wait_meta_into_result(args, result),
+                },
+            },
+        )
+        return
+
     if unresolved_stall_reasons and not (result.get("hasErrors") or result.get("errorCount", 0) > 0):
         code = "compile_stalled_background"
         message = "compile_check timed out while Unity remained compiling in background."
@@ -863,13 +1031,248 @@ def do_compile_check(args, port: int) -> None:
     print_unitap_response(args, {"ok": True, "result": result})
 
 
+# Menu paths that open native (modal) OS dialogs. These hang Unity for
+# automation because the dialog blocks the main thread until a human closes
+# it. Block them in the CLI and suggest safer alternatives.
+BLOCKED_EXECUTE_MENU_PATHS = {
+    "File/New Scene": "tool_exec --tool open_scene --params '{\"scenePath\": \"...\"}' を使う",
+    "File/Open Scene": "tool_exec --tool open_scene --params '{\"path\": \"Assets/...unity\"}' を使う",
+    "File/Open Scene Additive": "tool_exec --tool open_scene --params '{\"path\": \"...\", \"additive\": true}' を使う",
+    "File/Save As...": "save_scene コマンドを使う",
+    "File/Save As": "save_scene コマンドを使う",
+    "File/Save Scene As": "save_scene コマンドを使う",
+    "File/Save Scene As...": "save_scene コマンドを使う",
+    "File/Save Project": "save_scene --all を使う",
+    "File/Build And Run": "ビルドは CLI/CI 経由で実行し、対話的ビルドは避ける",
+    "File/Build Settings...": "Build 系 window は CLI からは開かない",
+    "Assets/Import New Asset...": "直接ファイルを Assets/ にコピーして refresh を呼ぶ",
+    "Assets/Export Package...": "ExportPackage API を tool_exec 経由で呼ぶ",
+}
+
+
+TOOL_EXEC_TOP_LEVEL_ALIASES = {
+    "clear_console": "clear_console",
+    "list_tools": "tool_list",
+    "execute_menu": "execute_menu --menuPath <path>",
+    "manage_editor": "play / stop / launch のいずれか",
+}
+
+LONG_RUNNING_TOOL_TIMEOUTS_MS = {
+    "export_sprite_atlas": 180000,
+}
+
+
+def _check_execute_menu_blocklist(menu_path: str) -> None:
+    if not menu_path:
+        return
+    normalized = menu_path.strip()
+    # exact match + endswith "..." variants
+    for blocked, alt in BLOCKED_EXECUTE_MENU_PATHS.items():
+        if normalized == blocked or normalized == blocked + "...":
+            print(
+                f"Error: execute_menu は '{menu_path}' を拒否しました。"
+                f"ネイティブファイルダイアログが開いて Unity が固まります。"
+                f"代わりに: {alt}",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+
+def _result_is_pending(resp: dict) -> bool:
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        return False
+    result = resp.get("result")
+    if not isinstance(result, dict):
+        return False
+    return result.get("_mcp_status") == "pending"
+
+
+def _mark_pending_tool_exec_response(resp: dict) -> dict:
+    if not _result_is_pending(resp):
+        return resp
+
+    marked = dict(resp)
+    result = dict(marked.get("result") or {})
+    result.setdefault("rawSuccess", result.get("success"))
+    result["pending"] = True
+    result["success"] = False
+    if not result.get("message"):
+        result["message"] = "tool_exec is still pending. Re-run with --wait or poll action=status."
+    marked["result"] = result
+    return marked
+
+
+def _result_is_terminal_complete(resp: dict) -> bool:
+    if not isinstance(resp, dict) or not resp.get("ok"):
+        return False
+    result = resp.get("result")
+    if not isinstance(result, dict):
+        return False
+    status = result.get("_mcp_status")
+    # complete (success), error (terminal failure), or no _mcp_status (plain result) all stop polling.
+    return status in (None, "complete", "error", "completed", "failed")
+
+
+def poll_pending_tool_exec(
+    args,
+    port: int,
+    tool_name: str,
+    initial_resp: dict,
+    request_timeout_ms: int,
+) -> dict:
+    """run_automate_test 等の PendingResponse を action=status で完了まで poll する。
+
+    sync 側で完結させることで host LLM が status をループ呼びする必要をなくす。
+    """
+    if not _result_is_pending(initial_resp):
+        return initial_resp
+
+    wait_timeout_s = max(5.0, float(getattr(args, "wait_timeout", 1800) or 1800))
+    poll_override = float(getattr(args, "wait_poll_interval", 0.0) or 0.0)
+    deadline = time.time() + wait_timeout_s
+    current_port = port
+    resp = initial_resp
+
+    request_timeout_ms = max(5000, min(int(request_timeout_ms), 60000))
+    request_timeout_s = request_timeout_ms / 1000.0 + 5.0
+    status_params = {"tool": tool_name, "params": {"action": "status"}}
+
+    consecutive_conn_errors = 0
+
+    while time.time() < deadline:
+        if _result_is_terminal_complete(resp):
+            return resp
+
+        result = resp.get("result", {}) if isinstance(resp, dict) else {}
+        if poll_override > 0:
+            interval = max(0.5, poll_override)
+        else:
+            try:
+                interval = float(result.get("_mcp_poll_interval") or POLL_INTERVAL)
+            except (TypeError, ValueError):
+                interval = POLL_INTERVAL
+            interval = max(0.5, interval)
+        time.sleep(interval)
+
+        poll_req = build_request("tool_exec", status_params, request_timeout_ms, False)
+        try:
+            resp = send_request_to_current_transport(
+                args.project,
+                poll_req,
+                timeout_s=request_timeout_s,
+                fallback_host="127.0.0.1",
+                fallback_port=current_port,
+            )
+            consecutive_conn_errors = 0
+        except (ConnectionRefusedError, ConnectionError, ConnectionResetError, socket.timeout) as ex:
+            consecutive_conn_errors += 1
+            print(f"[unitap] tool_exec --wait: connection lost during poll ({ex}), checking Unity...", file=sys.stderr)
+            poll_hb = find_heartbeat(args.project)
+            root = find_project_root(args.project)
+            process_alive = is_unity_process_running(root) if root else is_unity_process_running()
+            if not process_alive and (not poll_hb or not check_heartbeat_fresh(poll_hb)):
+                return {
+                    "ok": False,
+                    "error": {
+                        "code": "connection_lost",
+                        "message": "Unity process not found and heartbeat stale during pending poll",
+                    },
+                }
+            # PendingResponse は本格的に長時間処理 (Play mode entry 等) を含むので
+            # 再接続待ちは通常 wait より寛容にする。残時間の半分まで待つ。
+            remaining = max(int((deadline - time.time()) / CONNECTION_RETRY_INTERVAL), 1)
+            generous_budget = max(CONNECTION_RETRY_MAX * 4, remaining // 2)
+            hb = wait_for_connection(
+                args.project,
+                max_retries=min(remaining, generous_budget),
+                require_tcp=True,
+            )
+            if hb and hb.get("port"):
+                current_port = int(hb["port"])
+                resp = {"ok": True, "result": {"_mcp_status": "pending", "_mcp_poll_interval": 1.0}}
+                continue
+            # Heartbeat があれば process は生きている可能性が高い。最後にもう一度状態問い合わせを試す。
+            poll_hb = find_heartbeat(args.project)
+            if poll_hb and check_heartbeat_fresh(poll_hb):
+                resp = {"ok": True, "result": {"_mcp_status": "pending", "_mcp_poll_interval": 2.0}}
+                continue
+            return {
+                "ok": False,
+                "error": {"code": "connection_lost", "message": "Unity reconnect timed out during pending poll"},
+            }
+        except OSError as ex:
+            print(f"[unitap] tool_exec --wait: socket error during poll ({ex}), retrying...", file=sys.stderr)
+            time.sleep(0.5)
+            continue
+        except RuntimeError as ex:
+            print(f"[unitap] tool_exec --wait: protocol error during poll ({ex}), retrying...", file=sys.stderr)
+            time.sleep(0.5)
+            continue
+
+        if not isinstance(resp, dict):
+            continue
+
+    # Timed out
+    elapsed = int(wait_timeout_s)
+    return {
+        "ok": False,
+        "error": {
+            "code": "wait_timeout",
+            "message": f"tool_exec --wait timed out after {elapsed}s while polling {tool_name} status",
+            "details": {"tool": tool_name, "lastResponse": resp},
+        },
+    }
+
+
+def _tool_exec_alias_error(tool_name: str, tool_params: dict) -> dict | None:
+    if tool_name == "eval":
+        return {
+            "ok": False,
+            "error": {
+                "code": "tool_exec_eval_disabled",
+                "message": "tool_exec eval は安全のため無効です。専用の custom tool か既存コマンドを追加してください。",
+            },
+        }
+
+    alternative = TOOL_EXEC_TOP_LEVEL_ALIASES.get(tool_name)
+    if alternative is None:
+        return None
+
+    if tool_name == "execute_menu":
+        menu_path = tool_params.get("menuPath")
+        if isinstance(menu_path, str) and menu_path.strip():
+            alternative = f"execute_menu --menuPath {json.dumps(menu_path, ensure_ascii=False)}"
+
+    if tool_name == "manage_editor":
+        action = tool_params.get("action")
+        if action in ("play", "stop"):
+            alternative = str(action)
+        elif action == "launch":
+            alternative = "launch"
+
+    return {
+        "ok": False,
+        "error": {
+            "code": "tool_exec_top_level_command",
+            "message": f"'{tool_name}' は tool_exec 用 custom tool ではありません。代わりに `{alternative}` を使ってください。",
+            "details": {
+                "tool": tool_name,
+                "alternative": alternative,
+            },
+        },
+    }
+
+
 def do_sync_command(args, port: int) -> None:
     """Synchronous command dispatcher for simple request-response commands."""
     params = {}
     retryable = True
+    timeout_ms = DEFAULT_TIMEOUT_MS
 
     if args.command == "execute_menu":
+        _check_execute_menu_blocklist(args.menuPath)
         params = {"menuPath": args.menuPath}
+        timeout_ms = int(getattr(args, "timeout_ms", timeout_ms) or timeout_ms)
         retryable = False
     elif args.command == "read_console":
         params = {"limit": args.limit}
@@ -885,13 +1288,37 @@ def do_sync_command(args, port: int) -> None:
         except (json.JSONDecodeError, TypeError):
             print("Error: Invalid JSON in --params", file=sys.stderr)
             sys.exit(1)
+        if not isinstance(tool_params, dict):
+            print_unitap_response(
+                args,
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "invalid_tool_params",
+                        "message": "tool_exec --params は JSON object を指定してください。",
+                    },
+                },
+            )
+            return
+        alias_error = _tool_exec_alias_error(args.tool, tool_params)
+        if alias_error is not None:
+            print_unitap_response(args, alias_error)
+            return
         params = {"tool": args.tool, "params": tool_params}
+        timeout_ms = int(getattr(args, "timeout_ms", DEFAULT_TIMEOUT_MS) or DEFAULT_TIMEOUT_MS)
+        if timeout_ms == DEFAULT_TIMEOUT_MS:
+            timeout_ms = LONG_RUNNING_TOOL_TIMEOUTS_MS.get(args.tool, timeout_ms)
         retryable = False
     elif args.command == "save_scene":
         params = {"all": args.all}
         retryable = False
+    elif args.command == "reimport":
+        params = {
+            "paths": list(args.paths),
+            "recursive": bool(getattr(args, "recursive", True)),
+        }
+        retryable = False
 
-    timeout_ms = DEFAULT_TIMEOUT_MS
     req = build_request(args.command, params, timeout_ms, retryable)
 
     try:
@@ -901,11 +1328,39 @@ def do_sync_command(args, port: int) -> None:
             req,
             timeout_s=timeout_ms / 1000 + 5,
             project_path=args.project,
-            exit_on_error=True,
+            exit_on_error=False,
         )
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
+        print_unitap_response(
+            args,
+            {
+                "ok": False,
+                "error": {
+                    "code": "connection_lost",
+                    "message": str(e),
+                },
+            },
+        )
+        return
+
+    should_wait = bool(getattr(args, "wait", False))
+    if args.command == "tool_exec" and getattr(args, "wait", None) is None and args.tool == "run_automate_test":
+        should_wait = True
+
+    if (
+        args.command == "tool_exec"
+        and should_wait
+        and _result_is_pending(resp)
+    ):
+        resp = poll_pending_tool_exec(
+            args,
+            port,
+            args.tool,
+            resp,
+            timeout_ms,
+        )
+    elif args.command == "tool_exec":
+        resp = _mark_pending_tool_exec_response(resp)
 
     if isinstance(resp, dict) and resp.get("ok"):
         result = resp.get("result", {})

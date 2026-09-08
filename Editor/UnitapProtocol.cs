@@ -29,6 +29,11 @@ namespace Unitap
         public UnitapError Error { get; set; }
         [JsonProperty("editor")] public EditorState Editor { get; set; }
         [JsonProperty("completedAtUtc")] public string CompletedAtUtc { get; set; }
+        [JsonProperty("processingTimeMs")] public long ProcessingTimeMs { get; set; }
+        [JsonProperty("transportKind", NullValueHandling = NullValueHandling.Ignore)]
+        public string TransportKind { get; set; }
+        [JsonProperty("warnings", NullValueHandling = NullValueHandling.Ignore)]
+        public string[] Warnings { get; set; }
     }
 
     public sealed class UnitapError
@@ -47,20 +52,26 @@ namespace Unitap
         [JsonProperty("activeScene")] public string ActiveScene { get; set; }
     }
 
-    public sealed class HeartbeatData
+    public sealed class UnitapTransportInfo
     {
-        [JsonProperty("pid")] public int Pid { get; set; }
-        [JsonProperty("port")] public int Port { get; set; }
+        [JsonProperty("kind")] public string Kind { get; set; }
+        [JsonProperty("host", NullValueHandling = NullValueHandling.Ignore)]
+        public string Host { get; set; }
+        [JsonProperty("port", NullValueHandling = NullValueHandling.Ignore)]
+        public int? Port { get; set; }
         [JsonProperty("pipeName", NullValueHandling = NullValueHandling.Ignore)]
         public string PipeName { get; set; }
         [JsonProperty("pipeSocketPath", NullValueHandling = NullValueHandling.Ignore)]
         public string PipeSocketPath { get; set; }
-        [JsonProperty("fileTransportDir", NullValueHandling = NullValueHandling.Ignore)]
-        public string FileTransportDir { get; set; }
-        [JsonProperty("availableTransports", NullValueHandling = NullValueHandling.Ignore)]
-        public string[] AvailableTransports { get; set; }
-        [JsonProperty("pidFile", NullValueHandling = NullValueHandling.Ignore)]
-        public string PidFile { get; set; }
+        [JsonProperty("fileTransportDirectory", NullValueHandling = NullValueHandling.Ignore)]
+        public string FileTransportDirectory { get; set; }
+    }
+
+    public sealed class HeartbeatData
+    {
+        [JsonProperty("pid")] public int Pid { get; set; }
+        [JsonProperty("port", NullValueHandling = NullValueHandling.Ignore)]
+        public int? Port { get; set; }
         [JsonProperty("projectPath")] public string ProjectPath { get; set; }
         [JsonProperty("projectName")] public string ProjectName { get; set; }
         [JsonProperty("unityVersion")] public string UnityVersion { get; set; }
@@ -69,5 +80,15 @@ namespace Unitap
         [JsonProperty("isPlaying")] public bool IsPlaying { get; set; }
         [JsonProperty("hasErrors")] public bool HasErrors { get; set; }
         [JsonProperty("errorCount")] public int ErrorCount { get; set; }
+        [JsonProperty("timeSinceStartup")] public double TimeSinceStartup { get; set; }
+        [JsonProperty("transportKind")] public string TransportKind { get; set; }
+        [JsonProperty("host", NullValueHandling = NullValueHandling.Ignore)]
+        public string Host { get; set; }
+        [JsonProperty("pipeName", NullValueHandling = NullValueHandling.Ignore)]
+        public string PipeName { get; set; }
+        [JsonProperty("pipeSocketPath", NullValueHandling = NullValueHandling.Ignore)]
+        public string PipeSocketPath { get; set; }
+        [JsonProperty("fileTransportDirectory", NullValueHandling = NullValueHandling.Ignore)]
+        public string FileTransportDirectory { get; set; }
     }
 }

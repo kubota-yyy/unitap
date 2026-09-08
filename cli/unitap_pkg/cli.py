@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -10,17 +11,26 @@ from .constants import (
     CONNECTION_RETRY_MAX,
     LIVENESS_RECONNECT_RETRY_MAX,
 )
-from .editor_log import find_project_root, read_compile_errors, try_editor_log_fallback
+from .editor_log import (
+    find_project_root,
+    read_compile_errors,
+    summarize_project_editor_activity,
+    try_editor_log_fallback,
+)
 from .editor_lock import (
     EditorOperationBusyError,
     build_editor_lock_metadata,
     command_requires_editor_lock,
     editor_operation_lock,
+    get_editor_operation_lock_snapshot,
 )
 from .heartbeat import check_heartbeat_fresh, find_heartbeat
 from .project import ProjectResolutionError, resolve_project_root
+from .runtime_diagnostics import classify_unity_unavailability
 from .transport import wait_for_connection
-from .unity import focus_unity_editor, is_unity_process_running
+from .unity import dismiss_startup_dialogs_async, focus_unity_editor, is_unity_process_running
+from .execution_history import record_execution_history
+from .unicli_bridge import register as register_unicli
 from .commands import (
     do_capture,
     do_capture_editor,
@@ -44,17 +54,18 @@ except Exception as e:
 
 
 def _print_cli_error(args, code: str, message: str, details: dict | None = None) -> None:
+    error_payload = {
+        "ok": False,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+    if details:
+        error_payload["error"]["details"] = details
+    setattr(args, "_last_unitap_response", error_payload)
     if args.json:
-        payload = {
-            "ok": False,
-            "error": {
-                "code": code,
-                "message": message,
-            },
-        }
-        if details:
-            payload["error"]["details"] = details
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print(json.dumps(error_payload, indent=2, ensure_ascii=False))
     else:
         print(f"Error [{code}]: {message}", file=sys.stderr)
 
@@ -63,6 +74,21 @@ def _is_unity_running_for_project(project_root: Path | None) -> bool:
     if project_root is not None:
         return is_unity_process_running(project_root)
     return is_unity_process_running()
+
+
+def _known_dialog_dismiss_timeout_seconds(args) -> int:
+    override = os.environ.get("UNITAP_DIALOG_DISMISS_TIMEOUT_SECONDS")
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            pass
+
+    timeout_ms = getattr(args, "timeout", None)
+    if isinstance(timeout_ms, int) and timeout_ms > 0:
+        return max(300, min(3600, int(timeout_ms / 1000) + 300))
+
+    return 1800
 
 
 def _append_wait_meta(
@@ -116,6 +142,54 @@ def _append_wait_meta(
     setattr(args, "_wait_meta", meta)
 
 
+def _print_unity_unavailability(args, process_running: bool, *, state: str | None = None) -> None:
+    diagnosis = classify_unity_unavailability(
+        process_running,
+        summarize_project_editor_activity(getattr(args, "project", None)),
+        state=state,
+    )
+    details = dict(diagnosis.get("details") or {})
+    if getattr(args, "project", None):
+        details.setdefault("projectPath", args.project)
+    _print_cli_error(args, diagnosis["code"], diagnosis["message"], details or None)
+
+
+def _record_command_history(args, started_at: float) -> None:
+    if bool(getattr(args, "_skip_history", False)):
+        return
+    record_execution_history(
+        project_path=getattr(args, "project", None),
+        args=args,
+        response=getattr(args, "_last_unitap_response", None),
+        started_at_epoch=started_at,
+        completed_at_epoch=time.time(),
+        exit_code=getattr(args, "_command_exit_code", None),
+    )
+
+
+def _should_skip_tool_exec_history(args) -> bool:
+    if os.environ.get("UNITAP_HISTORY_INCLUDE_POLLING"):
+        return False
+
+    if getattr(args, "tool", None) != "run_automate_test":
+        return False
+
+    try:
+        params = json.loads(getattr(args, "params", "{}"))
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(params, dict):
+        return False
+
+    return params.get("action") in {"status", "ready"}
+
+
+def _should_skip_polling_history(args) -> bool:
+    if os.environ.get("UNITAP_HISTORY_INCLUDE_POLLING"):
+        return False
+    return getattr(args, "command", None) in {"status", "heartbeat"}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Unitap - Unity Editor control CLI")
     parser.add_argument("--project", help="Unity project path", default=None)
@@ -157,8 +231,28 @@ def main():
 
     p_menu = subparsers.add_parser("execute_menu")
     p_menu.add_argument("--menuPath", required=True)
+    p_menu.add_argument("--timeout-ms", type=int, default=180000, help="Request timeout in ms")
 
     subparsers.add_parser("refresh")
+
+    p_reimport = subparsers.add_parser(
+        "reimport",
+        help="Re-import specific assets/folders (lighter than Reimport All).",
+    )
+    p_reimport.add_argument(
+        "--paths",
+        required=True,
+        nargs="+",
+        help="One or more asset paths (Assets/... or absolute under project root, folder ok).",
+    )
+    p_reimport.add_argument(
+        "--no-recursive",
+        dest="recursive",
+        action="store_false",
+        default=True,
+        help="When the path is a folder, do not recurse into subassets (default: recurse).",
+    )
+
     subparsers.add_parser("focus", help="Bring Unity Editor to front")
 
     p_idle = subparsers.add_parser("wait_idle")
@@ -205,6 +299,34 @@ def main():
     p_exec = subparsers.add_parser("tool_exec")
     p_exec.add_argument("--tool", required=True)
     p_exec.add_argument("--params", default="{}", help="JSON params")
+    p_exec.add_argument("--timeout-ms", type=int, default=30000, help="Request timeout in ms")
+    p_exec.add_argument(
+        "--history",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Record this tool_exec in execution history. Status polling is skipped by default.",
+    )
+    p_exec.add_argument(
+        "--wait",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "When the tool returns _mcp_status=pending, poll action=status until completion. "
+            "Defaults to enabled for run_automate_test; use --no-wait to fire and forget."
+        ),
+    )
+    p_exec.add_argument(
+        "--wait-timeout",
+        type=int,
+        default=1800,
+        help="Total seconds to wait for pending tool completion (default: 1800).",
+    )
+    p_exec.add_argument(
+        "--wait-poll-interval",
+        type=float,
+        default=0.0,
+        help="Override poll interval in seconds (0 = use _mcp_poll_interval from response, min 0.5).",
+    )
 
     p_compile = subparsers.add_parser("compile_check", help="Compile and check for errors")
     p_compile.add_argument("--timeout", type=int, default=90000, help="Timeout in ms")
@@ -283,11 +405,17 @@ def main():
     p_launch = subparsers.add_parser("launch", help="Launch Unity Editor")
     p_launch.add_argument("--no-kill", action="store_true", help="Don't kill existing Unity processes")
     p_launch.add_argument("--kill-project-only", action="store_true", help="Only kill Unity for this project")
-    p_launch.add_argument("--restart", action="store_true", help="Force restart when Unity is already running")
+    p_launch.add_argument("--restart", action="store_true", help="Restart Unity when needed")
+    p_launch.add_argument("--force-restart", action="store_true", help="Always restart Unity even when it is already healthy")
     p_launch.add_argument(
         "--ignore-compiler-errors",
         action="store_true",
-        help="Append -ignoreCompilerErrors when launching Unity",
+        help="(deprecated) -ignoreCompilerErrors はデフォルトで付与される. 互換用に残置",
+    )
+    p_launch.add_argument(
+        "--no-ignore-compiler-errors",
+        action="store_true",
+        help="-ignoreCompilerErrors と Safe Mode 自動 Ignore を無効化する",
     )
     p_launch.add_argument("--no-wait", action="store_true", help="Don't wait for startup confirmation")
     p_launch.add_argument("--wait-timeout", type=int, default=180, help="Startup wait timeout in seconds")
@@ -304,6 +432,8 @@ def main():
         "capture_editor": do_capture_editor,
     }
 
+    register_unicli(subparsers, dispatch_table)
+
     # --- Extension registration ---
     ext_ok = False
     if _ext_module and hasattr(_ext_module, "register"):
@@ -314,10 +444,31 @@ def main():
             print(f"Warning: unitap_ext.register() failed: {e}", file=sys.stderr)
 
     args = parser.parse_args()
+    setattr(args, "_last_unitap_response", None)
+    setattr(args, "_command_exit_code", None)
+    command_started_at = time.time()
+
+    if args.command == "tool_exec":
+        if getattr(args, "history", None) is False:
+            setattr(args, "_skip_history", True)
+        elif getattr(args, "history", None) is None and _should_skip_tool_exec_history(args):
+            setattr(args, "_skip_history", True)
+    elif _should_skip_polling_history(args):
+        setattr(args, "_skip_history", True)
 
     # --- Validation ---
     if args.command == "read_console" and args.since_last_clear and args.since:
         print("Error: --since-last-clear and --since cannot be used together", file=sys.stderr)
+        sys.exit(1)
+
+    if args.command == "tool_exec" and args.timeout_ms <= 0:
+        print("Error: --timeout-ms must be > 0", file=sys.stderr)
+        sys.exit(1)
+    if args.command == "execute_menu" and args.timeout_ms <= 0:
+        _print_cli_error(args, "invalid_timeout", "--timeout-ms must be > 0")
+        sys.exit(1)
+    if args.command == "launch" and args.force_restart and not args.restart:
+        _print_cli_error(args, "invalid_launch_args", "--force-restart requires --restart")
         sys.exit(1)
 
     if args.command == "play":
@@ -351,10 +502,22 @@ def main():
 
     if args.command in ("wait_idle", "compile_check"):
         if args.timeout <= 0:
-            print("Error: --timeout must be > 0", file=sys.stderr)
+            _print_cli_error(args, "invalid_timeout", "--timeout must be > 0")
+            sys.exit(1)
+        if (
+            args.command == "wait_idle"
+            and args.timeout < 1000
+            and not os.environ.get("UNITAP_ALLOW_SUBSECOND_WAIT_IDLE")
+        ):
+            _print_cli_error(
+                args,
+                "invalid_timeout_unit",
+                "wait_idle --timeout はミリ秒です。秒指定のつもりなら 30000 のように指定してください。",
+                {"timeoutMs": args.timeout},
+            )
             sys.exit(1)
         if args.stall_focus_interval_ms < 0:
-            print("Error: --stall-focus-interval-ms must be >= 0", file=sys.stderr)
+            _print_cli_error(args, "invalid_stall_focus_interval", "--stall-focus-interval-ms must be >= 0")
             sys.exit(1)
     if args.lock_timeout <= 0:
         print("Error: --lock-timeout must be > 0", file=sys.stderr)
@@ -368,6 +531,12 @@ def main():
 
     if resolved_project:
         args.project = str(resolved_project)
+
+    # Unity may show native modal dialogs while compiling, refreshing, or
+    # reloading scenes. Keep the known-dialog dismisser alive around editor
+    # commands, not only immediately after launching Unity.
+    if args.command not in ("focus", "unicli"):
+        dismiss_startup_dialogs_async(timeout_seconds=_known_dialog_dismiss_timeout_seconds(args))
 
     lock_context = contextlib.nullcontext()
     if command_requires_editor_lock(args):
@@ -389,16 +558,88 @@ def main():
 
     # Commands that don't need heartbeat
     if args.command == "launch":
+        # 複数 session から同時に launch --restart が飛んでくると、デフォルトの
+        # --wait-lock (timeout 1800s) のせいで「前の launch を待ってからまた
+        # kill→relaunch」と再起動ループになる。launch だけは wait=False で扱い、
+        # 既に launch 中ならその場で alreadyRestarting を返してスキップする。
+        def _emit_already_restarting(holder: dict | None) -> None:
+            payload = {
+                "ok": True,
+                "launched": False,
+                "alreadyRestarting": True,
+                "message": "Unity launch is already in progress for this project. Skipped to avoid concurrent restarts.",
+                "projectPath": str(resolved_project) if resolved_project else None,
+                "holder": holder,
+            }
+            setattr(args, "_last_unitap_response", payload)
+            print(json.dumps(payload, indent=2, ensure_ascii=False))
+            setattr(args, "_command_exit_code", 0)
+            _record_command_history(args, command_started_at)
+
+        if resolved_project is not None:
+            pre_snapshot = get_editor_operation_lock_snapshot(resolved_project)
+            if pre_snapshot and pre_snapshot.get("held"):
+                pre_holder = pre_snapshot.get("holder") or {}
+                if pre_holder.get("command") == "launch":
+                    _emit_already_restarting(pre_holder)
+                    return
+
+        if resolved_project is not None:
+            launch_metadata = build_editor_lock_metadata(args, resolved_project)
+            launch_lock_context = editor_operation_lock(
+                resolved_project,
+                launch_metadata,
+                wait=False,
+                timeout_s=0.0,
+            )
+        else:
+            launch_lock_context = contextlib.nullcontext()
+
         try:
-            with lock_context:
+            with launch_lock_context:
                 dispatch_table["launch"](args, None)
+            setattr(args, "_command_exit_code", 0)
         except EditorOperationBusyError as ex:
+            details = ex.details if isinstance(ex.details, dict) else {}
+            busy_holder = details.get("holder") if isinstance(details, dict) else None
+            if isinstance(busy_holder, dict) and busy_holder.get("command") == "launch":
+                _emit_already_restarting(busy_holder)
+                return
             _print_cli_error(args, ex.code, ex.message, ex.details)
+            setattr(args, "_command_exit_code", 1)
+            _record_command_history(args, command_started_at)
             sys.exit(1)
+        _record_command_history(args, command_started_at)
         return
 
     if args.command == "focus":
         dispatch_table["focus"](args, None)
+        setattr(args, "_command_exit_code", 0)
+        _record_command_history(args, command_started_at)
+        return
+
+    if getattr(args, "_skip_heartbeat", False):
+        handler = dispatch_table.get(args.command)
+        if handler is None:
+            _print_cli_error(args, "unknown_command", f"Unknown command: {args.command}")
+            setattr(args, "_command_exit_code", 1)
+            _record_command_history(args, command_started_at)
+            sys.exit(1)
+        try:
+            with lock_context:
+                handler(args, None)
+            setattr(args, "_command_exit_code", 0)
+        except EditorOperationBusyError as ex:
+            _print_cli_error(args, ex.code, ex.message, ex.details)
+            setattr(args, "_command_exit_code", 1)
+            _record_command_history(args, command_started_at)
+            sys.exit(1)
+        except SystemExit as ex:
+            code = ex.code if isinstance(ex.code, int) else (0 if ex.code is None else 1)
+            setattr(args, "_command_exit_code", code)
+            _record_command_history(args, command_started_at)
+            raise
+        _record_command_history(args, command_started_at)
         return
 
     # --- Pre-heartbeat hooks (extensions can add watchdog recovery here) ---
@@ -436,15 +677,10 @@ def main():
         elif try_editor_log_fallback(args, "heartbeat not found"):
             return
         elif process_running:
-            _print_cli_error(
-                args,
-                "unity_running_but_unitap_unavailable",
-                "Unity process is running but Unitap heartbeat/TCP is unavailable.",
-                {"projectPath": args.project},
-            )
+            _print_unity_unavailability(args, True, state="missing_heartbeat")
             sys.exit(1)
         else:
-            _print_cli_error(args, "unity_not_running", "Unity is not running (heartbeat not found).")
+            _print_unity_unavailability(args, False, state="missing_heartbeat")
             sys.exit(1)
 
     if args.command == "heartbeat":
@@ -456,7 +692,10 @@ def main():
             if error_entries:
                 heartbeat["compileErrors"] = error_entries
                 heartbeat["compileErrorCount"] = len(error_entries)
+        setattr(args, "_last_unitap_response", {"ok": True, "result": heartbeat})
+        setattr(args, "_command_exit_code", 0 if fresh else 1)
         print(json.dumps(heartbeat, indent=2))
+        _record_command_history(args, command_started_at)
         sys.exit(0 if fresh else 1)
 
     # Stale/compiling heartbeat recovery
@@ -554,17 +793,12 @@ def main():
                         sys.exit(1)
                 process_running = _is_unity_running_for_project(project_root)
                 if process_running:
-                    _print_cli_error(
-                        args,
-                        "unity_running_but_unitap_unavailable",
-                        "Unity process is running but Unitap did not recover in time.",
-                        {"projectPath": args.project, "state": state},
-                    )
+                    _print_unity_unavailability(args, True, state=state)
                 else:
-                    _print_cli_error(args, "unity_not_running", "Unity is not running.")
+                    _print_unity_unavailability(args, False, state=state)
                 sys.exit(1)
 
-    port = heartbeat["port"]
+    port = int(heartbeat.get("port") or 0)
 
     # --- Command dispatch ---
     handler = dispatch_table.get(args.command)
@@ -572,9 +806,18 @@ def main():
         try:
             with lock_context:
                 handler(args, port)
+            setattr(args, "_command_exit_code", 0)
         except EditorOperationBusyError as ex:
             _print_cli_error(args, ex.code, ex.message, ex.details)
+            setattr(args, "_command_exit_code", 1)
+            _record_command_history(args, command_started_at)
             sys.exit(1)
+        except SystemExit as ex:
+            code = ex.code if isinstance(ex.code, int) else (0 if ex.code is None else 1)
+            setattr(args, "_command_exit_code", code)
+            _record_command_history(args, command_started_at)
+            raise
+        _record_command_history(args, command_started_at)
         return
 
     # Fallback: sync command (extensions can override via _sync_command key)
@@ -582,6 +825,15 @@ def main():
     try:
         with lock_context:
             sync_handler(args, port)
+        setattr(args, "_command_exit_code", 0)
     except EditorOperationBusyError as ex:
         _print_cli_error(args, ex.code, ex.message, ex.details)
+        setattr(args, "_command_exit_code", 1)
+        _record_command_history(args, command_started_at)
         sys.exit(1)
+    except SystemExit as ex:
+        code = ex.code if isinstance(ex.code, int) else (0 if ex.code is None else 1)
+        setattr(args, "_command_exit_code", code)
+        _record_command_history(args, command_started_at)
+        raise
+    _record_command_history(args, command_started_at)

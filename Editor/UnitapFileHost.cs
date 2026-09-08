@@ -14,6 +14,7 @@ namespace Unitap
         public bool IsRunning { get; private set; }
         public string RootDirectory { get; private set; }
         public string LastStartError { get; private set; }
+        public UnitapTransportInfo TransportInfo { get; private set; }
 
         string _requestsDirectory;
         string _processingDirectory;
@@ -36,6 +37,11 @@ namespace Unitap
 
                 LastStartError = null;
                 IsRunning = true;
+                TransportInfo = new UnitapTransportInfo
+                {
+                    Kind = "file",
+                    FileTransportDirectory = RootDirectory
+                };
                 Debug.Log($"[Unitap] File transport ready at {RootDirectory}");
                 return true;
             }
@@ -45,6 +51,20 @@ namespace Unitap
                 IsRunning = false;
                 Debug.LogError($"[Unitap] Failed to start file host ({ex.Message})");
                 return false;
+            }
+        }
+
+        public int QueueDepth
+        {
+            get
+            {
+                try
+                {
+                    return !IsRunning || string.IsNullOrEmpty(_requestsDirectory)
+                        ? 0
+                        : Directory.GetFiles(_requestsDirectory, "*.json").Length;
+                }
+                catch { return 0; }
             }
         }
 
@@ -107,6 +127,7 @@ namespace Unitap
         public void Dispose()
         {
             IsRunning = false;
+            TransportInfo = null;
         }
 
         void RestoreProcessingFiles()

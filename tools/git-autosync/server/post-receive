@@ -1,0 +1,48 @@
+#!/bin/bash
+# サーバー側 post-receive フック
+# push を受けたら autosync-clients に登録済みの各クライアントに SSH で同期を通知する
+
+HOOKS_DIR="$(cd "$(dirname "$0")" && pwd)"
+CLIENTS_FILE="$HOOKS_DIR/autosync-clients"
+
+# git が stdin で渡す "oldrev newrev refname" をドレイン
+# 最後にプッシュされたブランチを記録（タグや複数 ref の場合は最後のものを使用）
+PUSHED_BRANCH=""
+while read -r oldrev newrev refname; do
+    case "$refname" in
+        refs/heads/*) PUSHED_BRANCH="${refname#refs/heads/}" ;;
+    esac
+done
+
+[[ -f "$CLIENTS_FILE" ]] || exit 0
+
+# ブランチ名を安全にエスケープ（英数字・ハイフン・スラッシュ・ドットのみ許可）
+if [[ -z "$PUSHED_BRANCH" || ! "$PUSHED_BRANCH" =~ ^[a-zA-Z0-9/_.-]+$ ]]; then
+    exit 0
+fi
+
+# 各クライアントに非同期 SSH（push 完了をブロックしない）
+while IFS=' ' read -r user_host repo_path; do
+    [[ -z "$user_host" || "$user_host" == \#* ]] && continue
+
+    # user_host / repo_path をホワイトリスト検証（Shell Injection 対策）
+    if [[ ! "$user_host" =~ ^[a-zA-Z0-9._@-]+$ ]]; then
+        echo "WARNING: invalid user_host in autosync-clients: $user_host" >&2
+        continue
+    fi
+    if [[ ! "$repo_path" =~ ^[a-zA-Z0-9/_.-]+$ ]]; then
+        echo "WARNING: invalid repo_path in autosync-clients: $repo_path" >&2
+        continue
+    fi
+
+    nohup ssh \
+        -o ConnectTimeout=5 \
+        -o BatchMode=yes \
+        -o StrictHostKeyChecking=no \
+        "$user_host" \
+        "bash ${repo_path}/tools/git-autosync/autosync.sh ${PUSHED_BRANCH}" \
+        </dev/null >/dev/null 2>&1 &
+    disown $!
+done < "$CLIENTS_FILE"
+
+exit 0

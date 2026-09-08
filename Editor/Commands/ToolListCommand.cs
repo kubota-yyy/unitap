@@ -32,11 +32,38 @@ namespace Unitap.Commands
                 {
                     name = toolName,
                     description = attr.Description ?? "",
-                    className = type.FullName
+                    className = type.FullName,
+                    requiresPolling = attr.RequiresPolling,
+                    parameters = DiscoverToolParameters(type)
                 });
             }
 
             return new { tools = tools.OrderBy(t => ((dynamic)t).name).ToList(), count = tools.Count };
+        }
+
+        static List<object> DiscoverToolParameters(Type toolType)
+        {
+            var parameters = new List<object>();
+            var members = toolType.GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance);
+            foreach (var member in members)
+            {
+                var paramAttr = member.GetCustomAttribute<MCPForUnity.Editor.Tools.ToolParameterAttribute>();
+                if (paramAttr == null) continue;
+
+                var memberType = member is FieldInfo fi ? fi.FieldType
+                    : member is PropertyInfo pi ? pi.PropertyType
+                    : null;
+
+                parameters.Add(new
+                {
+                    name = paramAttr.Name ?? ToSnakeCase(member.Name),
+                    description = paramAttr.Description ?? "",
+                    required = paramAttr.Required,
+                    type = memberType?.Name ?? "unknown",
+                    defaultValue = paramAttr.DefaultValue
+                });
+            }
+            return parameters;
         }
 
         static string ToSnakeCase(string name)

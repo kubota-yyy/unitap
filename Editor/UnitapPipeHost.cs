@@ -25,12 +25,15 @@ namespace Unitap
         NamedPipeServerStream _acceptingPipe;
         Thread _acceptThread;
         volatile bool _running;
+        UnitapTransportInfo _transportInfo;
 
         public bool IsRunning => _running;
         public string PipeName { get; private set; }
         public string LastStartError { get; private set; }
+        public UnitapTransportInfo TransportInfo => _transportInfo;
 
         public bool TryDequeue(out UnitapPendingRequest request) => _inbox.TryDequeue(out request);
+        public int QueueDepth => _inbox.Count;
 
         public bool Start()
         {
@@ -39,6 +42,12 @@ namespace Unitap
                 PipeName = UnitapPipeName.GetPipeName();
                 LastStartError = null;
                 _running = true;
+                _transportInfo = new UnitapTransportInfo
+                {
+                    Kind = "pipe",
+                    PipeName = PipeName,
+                    PipeSocketPath = UnitapPipeName.GetUnixSocketPath(PipeName)
+                };
                 _acceptThread = new Thread(AcceptLoop)
                 {
                     IsBackground = true,
@@ -62,6 +71,7 @@ namespace Unitap
             _running = false;
             DisposeAcceptingPipe();
             _acceptThread?.Join(2000);
+            _transportInfo = null;
         }
 
         void AcceptLoop()
@@ -139,8 +149,6 @@ namespace Unitap
             {
                 using (pipe)
                 {
-                    pipe.ReadTimeout = 120_000;
-                    pipe.WriteTimeout = 30_000;
                     var header = new byte[HeaderSize];
 
                     while (_running && pipe.IsConnected)
@@ -201,18 +209,17 @@ namespace Unitap
                             continue;
                         }
 
-                        var responded = false;
+                        var responded = 0;
                         var pending = new UnitapPendingRequest
                         {
                             Request = request,
                             Respond = response =>
                             {
-                                if (responded)
+                                if (Interlocked.CompareExchange(ref responded, 1, 0) != 0)
                                 {
                                     return;
                                 }
 
-                                responded = true;
                                 try
                                 {
                                     WriteFrame(pipe, response);
@@ -226,16 +233,16 @@ namespace Unitap
                         _inbox.Enqueue(pending);
 
                         var deadline = DateTime.UtcNow.AddMilliseconds(request.TimeoutMs > 0 ? request.TimeoutMs : 30000);
-                        while (!responded && DateTime.UtcNow < deadline && _running)
+                        while (Volatile.Read(ref responded) == 0 && DateTime.UtcNow < deadline && _running)
                         {
                             Thread.Sleep(10);
                         }
 
-                        if (!responded)
+                        if (Interlocked.CompareExchange(ref responded, 1, 0) == 0)
                         {
+                            pending.Abandoned = true;
                             var timeoutResponse = MakeImmediateError(request.RequestId, "timeout", "Command timed out");
                             WriteFrame(pipe, timeoutResponse);
-                            responded = true;
                         }
                     }
                 }

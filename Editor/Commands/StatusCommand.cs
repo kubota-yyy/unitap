@@ -42,8 +42,15 @@ namespace Unitap.Commands
                 hasErrors = errorCount > 0,
                 errorCount,
                 warningCount,
+                transportKind = UnitapEntry.TransportInfo?.Kind ?? "unknown",
+                port = UnitapEntry.TransportInfo?.Port,
+                host = UnitapEntry.TransportInfo?.Host,
+                pipeName = UnitapEntry.TransportInfo?.PipeName,
+                pipeSocketPath = UnitapEntry.TransportInfo?.PipeSocketPath,
+                fileTransportDirectory = UnitapEntry.TransportInfo?.FileTransportDirectory,
                 loadedSceneCount = UnityEngine.SceneManagement.SceneManager.loadedSceneCount,
-                timeSinceStartup = EditorApplication.timeSinceStartup
+                timeSinceStartup = EditorApplication.timeSinceStartup,
+                queueDepth = UnitapEntry.QueueDepth
             };
         }
     }

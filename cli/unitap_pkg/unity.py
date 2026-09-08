@@ -1,5 +1,6 @@
 import os
 import platform
+import json
 import shlex
 import subprocess
 import sys
@@ -7,16 +8,144 @@ import time
 from pathlib import Path
 
 
+def get_expected_build_target(project_root: Path) -> str | None:
+    """Project-local Unitap build target guard.
+
+    UNITAP_EXPECTED_BUILD_TARGET overrides ProjectSettings/UnitapSettings.json.
+    """
+    override = os.environ.get("UNITAP_EXPECTED_BUILD_TARGET")
+    if override and override.strip():
+        return override.strip()
+
+    settings_path = project_root / "ProjectSettings" / "UnitapSettings.json"
+    if not settings_path.exists():
+        return None
+
+    try:
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    target = payload.get("expectedBuildTarget") if isinstance(payload, dict) else None
+    if isinstance(target, str) and target.strip():
+        return target.strip()
+    return None
+
+
 def build_unity_launch_command(
     editor_path: Path,
     project_root: Path,
     *,
-    ignore_compiler_errors: bool = False,
+    ignore_compiler_errors: bool = True,
+    build_target: str | None = None,
 ) -> list[str]:
     cmd = [str(editor_path), "-projectPath", str(project_root)]
+    if build_target:
+        cmd.extend(["-buildTarget", build_target])
     if ignore_compiler_errors:
         cmd.append("-ignoreCompilerErrors")
     return cmd
+
+
+def build_unity_launch_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("RWD_SUPPRESS_EDITOR_WELCOME_DIALOGS", "1")
+    return env
+
+
+_STARTUP_DIALOG_DISMISS_SCRIPT = r'''
+on run argv
+    set timeoutSeconds to 90
+    if (count of argv) is greater than 0 then
+        try
+            set timeoutSeconds to (item 1 of argv) as integer
+        end try
+    end if
+
+    set deadline to (current date) + timeoutSeconds
+    repeat while (current date) < deadline
+        try
+            tell application "System Events"
+                set unityProcs to (every process whose name is "Unity")
+                repeat with p in unityProcs
+                    try
+                        set winList to (every window of p)
+                        repeat with w in winList
+                            try
+                                set wName to name of w
+                                set buttonNames to {}
+                                try
+                                    set buttonNames to name of every button of w
+                                end try
+                                set dialogText to wName
+                                try
+                                    set textValues to value of every static text of w
+                                    repeat with textValue in textValues
+                                        set dialogText to dialogText & " " & (textValue as text)
+                                    end repeat
+                                end try
+                                if wName contains "Safe Mode" then
+                                    try
+                                        click button "Ignore" of w
+                                    end try
+                                end if
+                                if wName contains "Corrupted Library Detected" then
+                                    try
+                                        click button "Rebuild Library" of w
+                                    end try
+                                end if
+                                if buttonNames contains "Reload" and buttonNames contains "Ignore" then
+                                    if dialogText contains "open scene" or dialogText contains "open scene(s)" or dialogText contains "changed on disk" then
+                                        try
+                                            click button "Reload" of w
+                                        end try
+                                    end if
+                                end if
+                                if buttonNames contains "Cancel" and buttonNames contains "Open manual" then
+                                    if dialogText contains "UI Toolkit Particles" then
+                                        try
+                                            click button "Cancel" of w
+                                        end try
+                                    end if
+                                end if
+                            end try
+                        end repeat
+                    end try
+                end repeat
+            end tell
+        end try
+        delay 0.5
+    end repeat
+end run
+'''
+
+
+def dismiss_startup_dialogs_async(timeout_seconds: int = 90) -> None:
+    """Unity の既知ダイアログをバックグラウンドで処理する.
+
+    - "Enter Safe Mode?" は Ignore
+    - "Corrupted Library Detected" は Rebuild Library
+    - 外部変更された scene reload 確認は Reload
+
+    macOS 限定. Accessibility 権限がない場合は何もしない (silent fail).
+    """
+    if platform.system().lower() != "darwin":
+        return
+    try:
+        subprocess.Popen(
+            ["osascript", "-e", _STARTUP_DIALOG_DISMISS_SCRIPT, "--", str(int(timeout_seconds))],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        # osascript 不在等は致命ではないので無視する
+        pass
+
+
+def dismiss_safe_mode_dialog_async(timeout_seconds: int = 90) -> None:
+    """後方互換用。現在は起動時ダイアログ全般を処理する。"""
+    dismiss_startup_dialogs_async(timeout_seconds)
 
 
 def get_unity_version(project_root: Path) -> str | None:
@@ -258,11 +387,43 @@ def kill_unity_processes(project_root: Path | None = None) -> list[int]:
 
     terminated: list[int] = []
     remaining: set[int] = set()
+    quit_timeout = float(os.environ.get("UNITAP_UNITY_QUIT_TIMEOUT_SECONDS", "60"))
+    term_timeout = float(os.environ.get("UNITAP_UNITY_TERM_TIMEOUT_SECONDS", "20"))
+
+    can_quit_by_app = True
+    if project_root is not None:
+        can_quit_by_app = len(_list_unity_processes()) == len(targets)
+
+    if platform.system().lower() == "darwin" and can_quit_by_app:
+        try:
+            subprocess.run(
+                ["osascript", "-e", 'tell application "Unity" to quit'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+            remaining = {pid for pid, _ in targets}
+            deadline = time.time() + max(0.0, quit_timeout)
+            while remaining and time.time() < deadline:
+                remaining = {pid for pid in remaining if _process_exists(pid)}
+                if remaining:
+                    time.sleep(0.5)
+            for pid, _ in targets:
+                if pid not in remaining:
+                    terminated.append(pid)
+        except (subprocess.TimeoutExpired, OSError):
+            remaining = {pid for pid, _ in targets}
+    else:
+        remaining = {pid for pid, _ in targets}
 
     for pid, _ in targets:
+        if pid not in remaining:
+            continue
         try:
             os.kill(pid, signal.SIGTERM)
-            terminated.append(pid)
+            if pid not in terminated:
+                terminated.append(pid)
             remaining.add(pid)
         except ProcessLookupError:
             continue
@@ -270,7 +431,7 @@ def kill_unity_processes(project_root: Path | None = None) -> list[int]:
             # 権限等で kill できない PID は残存扱いにする
             remaining.add(pid)
 
-    deadline = time.time() + 8.0
+    deadline = time.time() + max(0.0, term_timeout)
     while remaining and time.time() < deadline:
         remaining = {pid for pid in remaining if _process_exists(pid)}
         if remaining:
@@ -281,7 +442,8 @@ def kill_unity_processes(project_root: Path | None = None) -> list[int]:
         for pid in list(remaining):
             try:
                 os.kill(pid, signal.SIGKILL)
-                terminated.append(pid)
+                if pid not in terminated:
+                    terminated.append(pid)
             except ProcessLookupError:
                 pass
             except OSError:

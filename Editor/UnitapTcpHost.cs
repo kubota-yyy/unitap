@@ -29,8 +29,12 @@ namespace Unitap
         TcpListener _listener;
         Thread _acceptThread;
         volatile bool _running;
+        UnitapTransportInfo _transportInfo;
+
+        public UnitapTransportInfo TransportInfo => _transportInfo;
 
         public bool TryDequeue(out UnitapPendingRequest req) => _inbox.TryDequeue(out req);
+        public int QueueDepth => _inbox.Count;
 
         public bool Start()
         {
@@ -46,6 +50,12 @@ namespace Unitap
                     _listener.Start();
                     BoundPort = port;
                     _running = true;
+                    _transportInfo = new UnitapTransportInfo
+                    {
+                        Kind = "tcp",
+                        Host = "127.0.0.1",
+                        Port = port
+                    };
                     _acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "Unitap-Accept" };
                     _acceptThread.Start();
                     Debug.Log($"[Unitap] TCP listening on 127.0.0.1:{port}");
@@ -67,6 +77,7 @@ namespace Unitap
             _running = false;
             try { _listener?.Stop(); } catch { /* ignore */ }
             _acceptThread?.Join(2000);
+            _transportInfo = null;
         }
 
         void AcceptLoop()
@@ -143,14 +154,13 @@ namespace Unitap
                     }
 
                     // メインスレッドで処理するためキューに積む
-                    var responded = false;
+                    var responded = 0;
                     var pending = new UnitapPendingRequest
                     {
                         Request = req,
                         Respond = resp =>
                         {
-                            if (responded) return;
-                            responded = true;
+                            if (Interlocked.CompareExchange(ref responded, 1, 0) != 0) return;
                             try { WriteFrame(stream, resp); }
                             catch (Exception ex) { Debug.LogWarning($"[Unitap] Write error: {ex.Message}"); }
                         }
@@ -159,15 +169,15 @@ namespace Unitap
 
                     // レスポンスが返るまで待機 (タイムアウト付き)
                     var deadline = DateTime.UtcNow.AddMilliseconds(req.TimeoutMs > 0 ? req.TimeoutMs : 30000);
-                    while (!responded && DateTime.UtcNow < deadline && _running)
+                    while (Volatile.Read(ref responded) == 0 && DateTime.UtcNow < deadline && _running)
                     {
                         Thread.Sleep(10);
                     }
 
-                    if (!responded)
+                    if (Interlocked.CompareExchange(ref responded, 1, 0) == 0)
                     {
+                        pending.Abandoned = true;
                         SendError(stream, req.RequestId, "timeout", "Command timed out");
-                        responded = true;
                     }
                 }
             }

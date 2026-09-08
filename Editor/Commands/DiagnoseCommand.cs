@@ -82,6 +82,17 @@ namespace Unitap.Commands
                 });
             }
 
+            // 非同期ジョブ実行中チェック
+            if (UnitapAsyncJob.HasRunningJob(out var runningJobId))
+            {
+                issues.Add(new
+                {
+                    issue = "async_job_running",
+                    detail = $"Async job '{runningJobId}' is running",
+                    next_actions = new[] { "status", "cancel" }
+                });
+            }
+
             if (issues.Count == 0)
             {
                 return new
@@ -89,7 +100,8 @@ namespace Unitap.Commands
                     status = "ok",
                     detail = "No issues detected. Editor is idle and ready.",
                     issues,
-                    next_actions = new string[] { }
+                    next_actions = new string[] { },
+                    timeSinceStartup = EditorApplication.timeSinceStartup
                 };
             }
 
@@ -98,7 +110,8 @@ namespace Unitap.Commands
                 status = "issues_found",
                 detail = $"{issues.Count} issue(s) detected",
                 issues,
-                next_actions = new[] { "status" }
+                next_actions = new[] { "status" },
+                timeSinceStartup = EditorApplication.timeSinceStartup
             };
         }
     }

@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- Sync the RWD-tested implementation: Unity 6.6 support, operation locks, diagnostics, execution history, UniCLI bridge and git autosync tooling.
+- Select one local transport using `UNITAP_TRANSPORT_PREFERENCE` (default file, pipe, tcp); CLI follows the project heartbeat. This replaces the March simultaneous transport selection.
+
+
+## [2026-03-19]
+
 ### Added
 - Pipe + file transport alongside the existing TCP transport
 - `UNITAP_TRANSPORT=file|pipe|tcp|auto`
