@@ -10,7 +10,10 @@ namespace Unitap.Tools
     /// <summary>
     /// SceneViewをキャプチャするツール
     /// </summary>
-    [McpForUnityTool("capture_sceneview")]
+    [McpForUnityTool("capture_sceneview", Description = "Render Scene View camera to a local PNG")]
+    [UnitapToolParameter("outputPath", "string", "Absolute local output PNG path", DefaultValue = "/tmp/unity_sceneview.png")]
+    [UnitapToolParameter("width", "int", "Image width in pixels", DefaultValue = "1920")]
+    [UnitapToolParameter("height", "int", "Image height in pixels", DefaultValue = "1080")]
     public static class SceneViewCapture
     {
         private const string DefaultOutputPath = "/tmp/unity_sceneview.png";

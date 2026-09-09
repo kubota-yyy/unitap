@@ -75,11 +75,36 @@ class UniCliBridgeTests(unittest.TestCase):
             (project / 'ProjectSettings').mkdir()
             (project / 'ProjectSettings/ProjectVersion.txt').write_text('m_EditorVersion: 6000.6.0f1')
             cli = Path(__file__).resolve().parents[1] / 'unitap.py'
-            with editor_lock.editor_operation_lock(project, {'command': 'compile_check'}, wait=False, timeout_s=0):
-                result = subprocess.run([sys.executable, str(cli), '--project', str(project),
-                    '--no-wait-lock', '--json', 'unicli', 'exec', 'PlayMode.Status'], capture_output=True, text=True, timeout=10)
-            self.assertEqual(1, result.returncode)
-            self.assertEqual('editor_busy', json.loads(result.stdout)['error']['code'])
+            for operation in [['unicli', 'exec', 'PlayMode.Status'], ['exec', 'PlayMode.Status'], ['eval', 'return 1;']]:
+                with editor_lock.editor_operation_lock(project, {'command': 'compile_check'}, wait=False, timeout_s=0):
+                    result = subprocess.run([sys.executable, str(cli), '--project', str(project),
+                        '--no-wait-lock', '--json', *operation], capture_output=True, text=True, timeout=10)
+                self.assertEqual(1, result.returncode)
+                self.assertEqual('editor_busy', json.loads(result.stdout)['error']['code'])
+
+    def test_aliases_preserve_locking_and_history_redaction(self):
+        from unitap_pkg.cli import build_parser
+        from unitap_pkg.execution_history import extract_command_context_from_args
+        parser, dispatch = build_parser()
+        for command, value in [('exec', 'PlayMode.Status'), ('eval', 'return "PRIVATE_BODY";')]:
+            args = parser.parse_args([command, '--timeout-ms', '8000', value])
+            self.assertTrue(editor_lock.command_requires_editor_lock(args))
+            self.assertIs(unicli_bridge.do_unicli, dispatch[command])
+            context = extract_command_context_from_args(args)
+            self.assertEqual(command, context['requestParams']['operation'])
+            self.assertEqual('unicli', context['requestParams']['backend'])
+            self.assertNotIn('PRIVATE_BODY', json.dumps(context))
+
+    def test_read_only_operations_do_not_take_editor_lock(self):
+        for operation in ['check', 'status', 'commands']:
+            self.assertFalse(editor_lock.command_requires_editor_lock(
+                argparse.Namespace(command='unicli', operation=operation)))
+
+    def test_discovery_does_not_focus_unity(self):
+        payload, run, code = self.invoke(operation='commands', forwarded=[])
+        self.assertEqual(0, code)
+        self.assertIn('--no-focus', run.call_args.args[0])
+        self.assertEqual('/chosen/project', run.call_args.kwargs['env']['UNICLI_PROJECT'])
 
     def test_parser_and_lock_registration(self):
         parser = argparse.ArgumentParser()

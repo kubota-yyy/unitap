@@ -31,6 +31,7 @@ from .transport import wait_for_connection
 from .unity import dismiss_startup_dialogs_async, focus_unity_editor, is_unity_process_running
 from .execution_history import record_execution_history
 from .unicli_bridge import register as register_unicli
+from .discovery import register as register_discovery
 from .commands import (
     do_capture,
     do_capture_editor,
@@ -190,7 +191,8 @@ def _should_skip_polling_history(args) -> bool:
     return getattr(args, "command", None) in {"status", "heartbeat"}
 
 
-def main():
+def build_parser():
+    """Build the same parser for execution, help and agent discovery."""
     parser = argparse.ArgumentParser(description="Unitap - Unity Editor control CLI")
     parser.add_argument("--project", help="Unity project path", default=None)
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
@@ -210,8 +212,8 @@ def main():
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # --- Core commands ---
-    subparsers.add_parser("status")
-    p_play = subparsers.add_parser("play")
+    subparsers.add_parser("status", help="Read Editor play/compile/update state")
+    p_play = subparsers.add_parser("play", help="Enter Play Mode, optionally wait for FSM state and capture")
     p_play.add_argument("--wait-idle-first", action="store_true", help="Run wait_idle before sending play")
     p_play.add_argument("--idle-timeout", type=int, default=30000, help="Timeout for --wait-idle-first in ms")
     p_play.add_argument(
@@ -227,13 +229,13 @@ def main():
     p_play.add_argument("--wait-fsm-required", action="store_true", help="Fail when FSM wait times out")
     p_play.add_argument("--capture-output", default=None, help="Capture GameView to path after play")
     p_play.add_argument("--capture-supersize", type=int, default=1, help="Capture resolution multiplier")
-    subparsers.add_parser("stop")
+    subparsers.add_parser("stop", help="Exit Play Mode")
 
-    p_menu = subparsers.add_parser("execute_menu")
+    p_menu = subparsers.add_parser("execute_menu", help="Execute a Unity menu item by menuPath")
     p_menu.add_argument("--menuPath", required=True)
     p_menu.add_argument("--timeout-ms", type=int, default=180000, help="Request timeout in ms")
 
-    subparsers.add_parser("refresh")
+    subparsers.add_parser("refresh", help="Refresh the AssetDatabase")
 
     p_reimport = subparsers.add_parser(
         "reimport",
@@ -255,7 +257,7 @@ def main():
 
     subparsers.add_parser("focus", help="Bring Unity Editor to front")
 
-    p_idle = subparsers.add_parser("wait_idle")
+    p_idle = subparsers.add_parser("wait_idle", help="Wait for compilation and asset imports to finish")
     p_idle.add_argument("--timeout", type=int, default=30000)
     p_idle.set_defaults(auto_focus_on_stall=True)
     p_idle.add_argument(
@@ -284,7 +286,7 @@ def main():
     p_wait_fsm.add_argument("--timeout", type=float, default=20.0, help="Timeout in seconds")
     p_wait_fsm.add_argument("--poll-interval", type=float, default=0.2, help="Poll interval in seconds")
 
-    p_console = subparsers.add_parser("read_console")
+    p_console = subparsers.add_parser("read_console", help="Read and filter captured Unity console messages")
     p_console.add_argument("--type", default=None, help="error|warning|log")
     p_console.add_argument("--limit", type=int, default=200)
     p_console.add_argument("--since-last-clear", action="store_true",
@@ -292,11 +294,11 @@ def main():
     p_console.add_argument("--since", default=None,
                            help="Only include logs since ISO8601 timestamp (e.g. 2026-02-15T00:00:00Z)")
 
-    subparsers.add_parser("clear_console")
-    subparsers.add_parser("cancel")
-    subparsers.add_parser("tool_list")
+    subparsers.add_parser("clear_console", help="Clear captured console messages")
+    subparsers.add_parser("cancel", help="Request cancellation of the current Unitap async job")
+    subparsers.add_parser("tool_list", help="Discover registered project tools and their parameter schemas")
 
-    p_exec = subparsers.add_parser("tool_exec")
+    p_exec = subparsers.add_parser("tool_exec", help="Execute a project tool with JSON parameters and optional polling")
     p_exec.add_argument("--tool", required=True)
     p_exec.add_argument("--params", default="{}", help="JSON params")
     p_exec.add_argument("--timeout-ms", type=int, default=30000, help="Request timeout in ms")
@@ -435,14 +437,18 @@ def main():
     register_unicli(subparsers, dispatch_table)
 
     # --- Extension registration ---
-    ext_ok = False
     if _ext_module and hasattr(_ext_module, "register"):
         try:
             _ext_module.register(subparsers, dispatch_table)
-            ext_ok = True
         except Exception as e:
             print(f"Warning: unitap_ext.register() failed: {e}", file=sys.stderr)
 
+    register_discovery(subparsers, dispatch_table, parser)
+    return parser, dispatch_table
+
+
+def main():
+    parser, dispatch_table = build_parser()
     args = parser.parse_args()
     setattr(args, "_last_unitap_response", None)
     setattr(args, "_command_exit_code", None)
@@ -524,7 +530,7 @@ def main():
         sys.exit(1)
 
     try:
-        resolved_project = resolve_project_root(args.project, allow_process_discovery=True)
+        resolved_project = resolve_project_root(args.project, allow_process_discovery=args.command not in ("commands", "describe"))
     except ProjectResolutionError as ex:
         _print_cli_error(args, ex.code, ex.message, ex.details)
         sys.exit(1)
@@ -535,7 +541,7 @@ def main():
     # Unity may show native modal dialogs while compiling, refreshing, or
     # reloading scenes. Keep the known-dialog dismisser alive around editor
     # commands, not only immediately after launching Unity.
-    if args.command not in ("focus", "unicli"):
+    if args.command not in ("focus", "unicli", "exec", "eval", "commands", "describe"):
         dismiss_startup_dialogs_async(timeout_seconds=_known_dialog_dismiss_timeout_seconds(args))
 
     lock_context = contextlib.nullcontext()

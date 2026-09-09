@@ -2,7 +2,7 @@
 
 ## 結論
 
-unitap は削除せず、普段の入口を unitap に一本化する。既存の障害診断・コンパイル回復・ゲーム専用検証は unitap 本体、UniCLI の汎用コマンドと C# eval は明示的な `unitap unicli` サブコマンドを使う。既存コマンドを自動で別バックエンドへ置き換えない。
+unitap は削除せず、普段の入口を unitap に一本化する。既存の障害診断・コンパイル回復・ゲーム専用検証は unitap 本体、UniCLI の汎用コマンドと C# eval は明示的な `unitap unicli` サブコマンドを使う。既存コマンドを自動で別バックエンドへ置き換えない。`exec` / `eval` の短縮入口、横断探索 `commands --live`、詳細スキーマ `describe` も利用できる。最新の使い方は [Codex向けガイド](agent-guide.md) を参照。
 
 | 用途 | 入口 | 理由 |
 |---|---|---|
@@ -37,7 +37,7 @@ unitap --project /path/to/UnityProject --json unicli --timeout-ms 600000 eval 'R
 
 成功は `ok: true`、`result.backend: "unicli"`、`result.response` に UniCLI の応答全体。CLI が非ゼロ終了、`success: false`、不正 JSON、起動不能、タイムアウトなら `ok: false` と終了コード 1。自動再試行・unitap 本体への自動フォールバックは行わない。
 
-全 `unicli` サブコマンドが既存の `Library/Unitap/.editor-op.lock` を使う。既定で待機し、`--no-wait-lock` なら即時 `editor_busy`、`--lock-timeout` で待機上限を指定できる。unitap を通さない UniCLI の直接実行や手動 Editor 操作には、この排他は効かない。非同期コマンドが「開始済み」で返る場合は処理完了までロックが続くわけではない。
+`unicli exec/eval` と短縮入口 `exec/eval` が既存の `Library/Unitap/.editor-op.lock` を使う。既定で待機し、`--no-wait-lock` なら即時 `editor_busy`、`--lock-timeout` で待機上限を指定できる。`unicli check/status/commands` と `commands` / `describe` はロックを取得しないため、長時間処理中も探索・接続確認できる。unitap を通さない UniCLI の直接実行や手動 Editor 操作には、この排他は効かない。非同期コマンドが「開始済み」で返る場合は処理完了までロックが続くわけではない。
 
 タイムアウトは CLI 待ちを打ち切るが、Unity 側処理の取り消しを保証しない。ロック解除後も Unity がビルド等を続ける可能性があるため、Editor・ログ・状態を調べてから次の変更を実行する。
 
@@ -49,7 +49,7 @@ Rabbit Punch で両方の接続・テストを確認済み。以前の3回測定
 
 UniCLI 1.7.0 の eval は Play 後に CS1703（BCL facade の重複参照）を再現した。停止のみでは復旧せず、unitap の compile_check 後に復旧した。このため全面置換せず、明示的な補助バックエンドとする。テストは誤った assembly 名でも成功・0件になるので、`total > 0` と `failed == 0` を確認する。
 
-今回のブリッジは Python 回帰21件（別プロセスの排他拒否を含む）、実 Editor の状態取得・EditModeテスト6件成功・WebGLビルド成功で確認した。
+初期ブリッジは Python 回帰21件（別プロセスの排他拒否を含む）、実 Editor の状態取得・EditModeテスト6件成功・WebGLビルド成功で確認した。
 
 ## ミニゲームの実装順
 

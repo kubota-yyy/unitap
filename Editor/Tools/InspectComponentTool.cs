@@ -10,7 +10,11 @@ using UnityEngine.SceneManagement;
 
 namespace Unitap.Tools
 {
-    [McpForUnityTool("inspect_component")]
+    [McpForUnityTool("inspect_component", Description = "Read serialized component fields on a GameObject")]
+    [UnitapToolParameter("gameObject", "string", "GameObject path or name", Required = true)]
+    [UnitapToolParameter("component", "string", "Component type; omit to list components")]
+    [UnitapToolParameter("fields", "string[]", "Field names to include")]
+    [UnitapToolParameter("limit", "int", "Maximum array items per field", DefaultValue = "50")]
     public static class InspectComponentTool
     {
         public static object HandleCommand(JObject @params)

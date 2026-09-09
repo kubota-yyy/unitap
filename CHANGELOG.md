@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+- Add Codex discovery: offline `commands`, live cross-backend search, and `describe` parameter/response schemas including project extensions.
+- Add `exec` / `eval` aliases sharing the UniCLI bridge, project locks and redacted request history; allow connection and catalog reads during exclusive operations.
+- Consolidate C# tool discovery and invocation using Unity TypeCache; document parameters for all 12 built-in tools and reject duplicate tool names.
+- Add repository agent instructions and a consumer integration guide.
+
 - Sync the RWD-tested implementation: Unity 6.6 support, operation locks, diagnostics, execution history, UniCLI bridge and git autosync tooling.
 - Select one local transport using `UNITAP_TRANSPORT_PREFERENCE` (default file, pipe, tcp); CLI follows the project heartbeat. This replaces the March simultaneous transport selection.
 

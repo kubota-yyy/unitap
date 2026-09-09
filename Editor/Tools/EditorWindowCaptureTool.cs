@@ -15,7 +15,15 @@ namespace Unitap.Tools
     /// <summary>
     /// 任意のEditorWindowをキャプチャするカスタムツール
     /// </summary>
-    [McpForUnityTool("capture_editor_window")]
+    [McpForUnityTool("capture_editor_window", Description = "Capture an Editor window to a local PNG")]
+    [UnitapToolParameter("outputPath", "string", "Absolute local output PNG path", DefaultValue = "/tmp/unity_editor_window.png")]
+    [UnitapToolParameter("window", "string", "Title or type hint")]
+    [UnitapToolParameter("windowTitle", "string", "Window title filter")]
+    [UnitapToolParameter("windowType", "string", "EditorWindow type name")]
+    [UnitapToolParameter("menuPath", "string", "Menu item to open a missing window")]
+    [UnitapToolParameter("focus", "bool", "Focus window before capture", DefaultValue = "true")]
+    [UnitapToolParameter("openIfMissing", "bool", "Open window by type if missing", DefaultValue = "true")]
+    [UnitapToolParameter("index", "int", "Index among matching windows", DefaultValue = "0")]
     public static class EditorWindowCaptureTool
     {
         private const string DefaultOutputPath = "/tmp/unity_editor_window.png";

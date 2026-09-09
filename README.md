@@ -14,7 +14,9 @@
 - **Editor.log fallback**: Works even when TCP is unavailable (compiling, frozen)
 - **Cross-platform**: macOS, Windows, Linux
 - **No external dependencies**: Python stdlib only (CLI), Newtonsoft.Json only (C#, bundled with Unity)
-- **Custom tool system**: Register your own tools via `[McpForUnityTool]` attribute
+- **Agent discovery**: `commands --live --search ...` combines CLI, project tools and UniCLI; `describe ID` returns parameters and types
+- **UniCLI integration**: `exec` / `eval` reuse UniCLI through Unitap's project lock, history and JSON envelope (optional dependency)
+- **Custom tool system**: Register tools with descriptions and parameter schemas via attributes
 
 ## Why not MCP?
 
@@ -65,6 +67,22 @@ Add to your `Packages/manifest.json`:
 既存の unitap 操作を維持し、汎用コマンドや一時的な C# 評価は `unitap unicli` から明示的に呼び出せます。プロジェクト指定、排他ロック、実行履歴、JSON の成功・失敗形式は unitap に統一します。UniCLI は任意の追加依存です。
 
 [使い分け・導入・検証済みコマンド](docs/unicli-bridge.md)
+
+## Codex / AI agents
+
+Start with the actual capability catalog, then request only the schema you need:
+
+```sh
+python3 cli/unitap.py --json commands
+python3 cli/unitap.py --project /path/to/UnityProject --json commands --live --search prefab
+python3 cli/unitap.py --project /path/to/UnityProject --json describe unicli:GameObject.Find
+python3 cli/unitap.py --project /path/to/UnityProject --json exec GameObject.Find '{"name":"Main Camera"}'
+python3 cli/unitap.py --project /path/to/UnityProject --json describe tool:find_assets
+```
+
+Offline discovery needs neither Unity nor UniCLI. Live discovery reports unavailable backends in `sources` and `partial`, preserves namespaced command IDs, and includes project extensions. It does not focus Unity or wait for an operation lock. Listings are compact; `describe` retains full parameter and nested response schemas.
+
+See [Codex agent guide](docs/agent-guide.md) for workflows, completion checks, timeout handling, extension metadata, and the discovery instruction to place in a consuming project's AGENTS.md. This repository's [AGENTS.md](AGENTS.md) provides the entry point for agents working on Unitap itself.
 
 ## CLI Usage
 
@@ -122,7 +140,8 @@ using MCPForUnity.Editor.Helpers;
 using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 
-[McpForUnityTool("my_tool")]
+[McpForUnityTool("my_tool", Description = "Return a greeting")]
+[Unitap.UnitapToolParameter("name", "string", "Name to greet", DefaultValue = "World")]
 public static class MyTool
 {
     public static object HandleCommand(JObject @params)
@@ -147,6 +166,8 @@ public static class MyTool
 | `capture_gameview` | Capture GameView screenshot |
 | `capture_editor_window` | Capture any EditorWindow |
 | `capture_sceneview` | Capture SceneView |
+| `invoke_inspector_action` | Invoke component methods, menu items, or UI buttons |
+| `list_custom_tools` | List project tools and resources with metadata |
 
 ## Extension System
 

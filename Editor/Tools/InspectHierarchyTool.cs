@@ -9,7 +9,11 @@ using UnityEngine.SceneManagement;
 
 namespace Unitap.Tools
 {
-    [McpForUnityTool("inspect_hierarchy")]
+    [McpForUnityTool("inspect_hierarchy", Description = "Inspect active scene hierarchy and optionally component names")]
+    [UnitapToolParameter("root", "string", "Root GameObject path; omit for whole scene")]
+    [UnitapToolParameter("depth", "int", "Maximum child depth", DefaultValue = "3")]
+    [UnitapToolParameter("includeComponents", "bool", "Include component type names", DefaultValue = "false")]
+    [UnitapToolParameter("limit", "int", "Maximum returned nodes", DefaultValue = "50")]
     public static class InspectHierarchyTool
     {
         public static object HandleCommand(JObject @params)

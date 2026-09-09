@@ -8,7 +8,11 @@ using UnityEngine.SceneManagement;
 
 namespace Unitap.Tools
 {
-    [McpForUnityTool("set_component")]
+    [McpForUnityTool("set_component", Description = "Set serialized component fields with Undo support")]
+    [UnitapToolParameter("gameObject", "string", "GameObject path or name", Required = true)]
+    [UnitapToolParameter("component", "string", "Component type name", Required = true)]
+    [UnitapToolParameter("values", "object", "Field name to value mapping", Required = true)]
+    [UnitapToolParameter("save", "bool", "Mark component dirty and save assets outside Play Mode", DefaultValue = "true")]
     public static class SetComponentTool
     {
         public static object HandleCommand(JObject @params)

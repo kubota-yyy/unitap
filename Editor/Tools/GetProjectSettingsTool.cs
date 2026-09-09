@@ -7,7 +7,8 @@ using UnityEngine;
 
 namespace Unitap.Tools
 {
-    [McpForUnityTool("get_project_settings")]
+    [McpForUnityTool("get_project_settings", Description = "Read player, quality or build settings")]
+    [UnitapToolParameter("category", "string", "player, quality or build", Required = true)]
     public static class GetProjectSettingsTool
     {
         public static object HandleCommand(JObject @params)

@@ -73,6 +73,8 @@ class EditorOperationBusyError(Exception):
 
 def command_requires_editor_lock(args) -> bool:
     command = str(getattr(args, "command", "") or "")
+    if command in ("unicli", "exec", "eval"):
+        return getattr(args, "operation", None) not in ("check", "status", "commands")
     if command in UNLOCKED_COMMANDS:
         return False
     if command == "run_playmode_test":

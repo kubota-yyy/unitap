@@ -11,7 +11,9 @@ namespace Unitap.Tools
     /// GameViewをキャプチャするツール
     /// MenuItemとMCPカスタムツールの両方で利用可能
     /// </summary>
-    [McpForUnityTool("capture_gameview")]
+    [McpForUnityTool("capture_gameview", Description = "Capture the Game View to a local PNG")]
+    [UnitapToolParameter("outputPath", "string", "Absolute local output PNG path", DefaultValue = "/tmp/unity_gameview.png")]
+    [UnitapToolParameter("superSize", "int", "Resolution multiplier", DefaultValue = "1")]
     public static class GameViewCapture
     {
         private const string DefaultOutputPath = "/tmp/unity_gameview.png";

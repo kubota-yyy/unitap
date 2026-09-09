@@ -7,7 +7,8 @@ using UnityEngine;
 
 namespace Unitap.Tools
 {
-    [McpForUnityTool("validate_prefab")]
+    [McpForUnityTool("validate_prefab", Description = "Check a prefab for missing scripts and references")]
+    [UnitapToolParameter("assetPath", "string", "Prefab asset path", Required = true)]
     public static class ValidatePrefabTool
     {
         public static object HandleCommand(JObject @params)

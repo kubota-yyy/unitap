@@ -7,7 +7,11 @@ using UnityEditor;
 
 namespace Unitap.Tools
 {
-    [McpForUnityTool("find_assets")]
+    [McpForUnityTool("find_assets", Description = "Search AssetDatabase with a query, type and folder")]
+    [UnitapToolParameter("query", "string", "AssetDatabase search expression", DefaultValue = "")]
+    [UnitapToolParameter("type", "string", "Unity asset type, e.g. Prefab")]
+    [UnitapToolParameter("path", "string", "Search folder, e.g. Assets/UI")]
+    [UnitapToolParameter("limit", "int", "Maximum returned assets", DefaultValue = "20")]
     public static class FindAssetsTool
     {
         public static object HandleCommand(JObject @params)

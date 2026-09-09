@@ -151,7 +151,7 @@ def extract_command_context_from_args(args) -> dict:
             context["tool"] = tool_name or None
         return context
 
-    if command == "unicli":
+    if command in ("unicli", "exec", "eval"):
         operation = getattr(args, "operation", None)
         forwarded = getattr(args, "unicli_args", [])
         context["requestParams"] = {

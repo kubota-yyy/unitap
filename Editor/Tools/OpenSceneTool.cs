@@ -9,7 +9,8 @@ namespace Unitap.Tools
     /// <summary>
     /// シーンを開くMCPカスタムツール
     /// </summary>
-    [McpForUnityTool("open_scene")]
+    [McpForUnityTool("open_scene", Description = "Open a scene in Single mode; save open scenes first when the active scene is dirty")]
+    [UnitapToolParameter("scenePath", "string", "Scene asset path", Required = true)]
     public static class OpenSceneTool
     {
         public static object HandleCommand(JObject @params)

@@ -16,7 +16,14 @@ namespace Unitap.Tools
     /// type="menu": MenuItem実行
     /// type="click": uGUI ButtonのonClickを発火
     /// </summary>
-    [McpForUnityTool("invoke_inspector_action")]
+    [McpForUnityTool("invoke_inspector_action", Description = "Invoke a component method, menu item or uGUI Button onClick")]
+    [UnitapToolParameter("type", "string", "method, menu or click", Required = true)]
+    [UnitapToolParameter("gameObject", "string", "Required for method: target GameObject")]
+    [UnitapToolParameter("component", "string", "Required for method: component type")]
+    [UnitapToolParameter("methodName", "string", "Required for method: method name")]
+    [UnitapToolParameter("args", "array", "Arguments for method invocation")]
+    [UnitapToolParameter("menuPath", "string", "Required for menu: menu item path")]
+    [UnitapToolParameter("uiPath", "string", "Required for click: uGUI Button path")]
     public static class InvokeInspectorAction
     {
         public static object HandleCommand(JObject @params)

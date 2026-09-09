@@ -2,8 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using System.Text.RegularExpressions;
-using MCPForUnity.Editor.Tools;
 using Newtonsoft.Json.Linq;
 
 namespace Unitap.Commands
@@ -22,16 +20,18 @@ namespace Unitap.Commands
             var toolParams = request.Params["params"] as JObject ?? new JObject();
 
             // ツールクラスを検索
-            var allToolEntries = EnumerateToolEntries();
-            var match = allToolEntries.FirstOrDefault(t => t.Name == toolName);
+            var allToolEntries = UnitapToolRegistry.DiscoverTools();
+            var matches = allToolEntries.Where(t => t.Name == toolName).ToList();
+            if (matches.Count > 1)
+                throw new UnitapCommandException("ambiguous_tool", $"Multiple tools registered as {toolName}",
+                    new { classes = matches.Select(entry => entry.Type.FullName).ToArray() });
+            var match = matches.FirstOrDefault();
 
-            if (match.Type == null)
+            if (match == null)
                 throw BuildToolNotFoundException(toolName, allToolEntries);
 
             // HandleCommand(JObject) メソッドを取得して実行
-            var method = match.Type.GetMethod("HandleCommand",
-                BindingFlags.Public | BindingFlags.Static,
-                null, new[] { typeof(JObject) }, null);
+            var method = match.Method;
 
             if (method == null)
                 throw new UnitapCommandException("tool_not_found", $"Tool {toolName} has no HandleCommand(JObject) method");
@@ -46,34 +46,7 @@ namespace Unitap.Commands
             }
         }
 
-        readonly struct ToolEntry
-        {
-            public readonly string Name;
-            public readonly Type Type;
-            public ToolEntry(string name, Type type) { Name = name; Type = type; }
-        }
-
-        static List<ToolEntry> EnumerateToolEntries()
-        {
-            var entries = new List<ToolEntry>();
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                if (asm.IsDynamic) continue;
-                Type[] types;
-                try { types = asm.GetTypes(); }
-                catch { continue; }
-                foreach (var t in types)
-                {
-                    var attr = t.GetCustomAttribute<McpForUnityToolAttribute>();
-                    if (attr == null) continue;
-                    var name = attr.Name ?? ToSnakeCase(t.Name);
-                    entries.Add(new ToolEntry(name, t));
-                }
-            }
-            return entries;
-        }
-
-        static UnitapCommandException BuildToolNotFoundException(string toolName, List<ToolEntry> all)
+        static UnitapCommandException BuildToolNotFoundException(string toolName, List<UnitapToolRegistry.Entry> all)
         {
             var available = all.Select(e => e.Name).OrderBy(n => n).ToList();
             var suggestions = SuggestToolNames(toolName, available, max: 5);
@@ -146,12 +119,5 @@ namespace Unitap.Commands
             return prev[b.Length];
         }
 
-        static string ToSnakeCase(string name)
-        {
-            if (string.IsNullOrEmpty(name)) return name;
-            var s1 = Regex.Replace(name, "(.)([A-Z][a-z]+)", "$1_$2");
-            var s2 = Regex.Replace(s1, "([a-z0-9])([A-Z])", "$1_$2");
-            return s2.ToLower();
-        }
     }
 }
