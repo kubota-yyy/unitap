@@ -53,7 +53,10 @@ def build_unity_launch_environment() -> dict[str, str]:
     return env
 
 
-_STARTUP_DIALOG_DISMISS_SCRIPT = r'''
+# pgrep -f で既存ウォッチャーを見つけるための識別子。スクリプト先頭に埋め込む。
+_STARTUP_DIALOG_DISMISS_MARKER = "unitap:startup-dialog-dismiss"
+
+_STARTUP_DIALOG_DISMISS_SCRIPT = f"-- {_STARTUP_DIALOG_DISMISS_MARKER}\n" + r'''
 on run argv
     set timeoutSeconds to 90
     if (count of argv) is greater than 0 then
@@ -120,6 +123,20 @@ end run
 '''
 
 
+def _startup_dialog_dismisser_running() -> bool:
+    """既に起動済みのダイアログ処理 osascript があるか (pgrep -f のマーカー一致で判定)."""
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", _STARTUP_DIALOG_DISMISS_MARKER],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
 def dismiss_startup_dialogs_async(timeout_seconds: int = 90) -> None:
     """Unity の既知ダイアログをバックグラウンドで処理する.
 
@@ -128,8 +145,14 @@ def dismiss_startup_dialogs_async(timeout_seconds: int = 90) -> None:
     - 外部変更された scene reload 確認は Reload
 
     macOS 限定. Accessibility 権限がない場合は何もしない (silent fail).
+    既にウォッチャーが動いている間は起動しない (多重起動防止).
     """
     if platform.system().lower() != "darwin":
+        return
+    # unitap は agent から短時間に何度も呼ばれる。呼ばれるたびに最長 30 分生きる
+    # osascript を切り離すと数千個溜まって System Events とメモリを食い潰すので、
+    # 既存ウォッチャーが生きている間はスキップする。
+    if _startup_dialog_dismisser_running():
         return
     try:
         subprocess.Popen(
