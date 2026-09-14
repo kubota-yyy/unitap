@@ -85,3 +85,10 @@ UPM パッケージ内の AGENTS.md が、利用プロジェクトルートで�
 > Unity 操作は `scripts/unitap` を使う。まず `scripts/unitap --json commands --live --search <用途>`、次に `scripts/unitap --json describe <id>` で利用可能な操作と引数を確認する。UniCLI も `scripts/unitap exec` / `eval` 経由で使う。
 
 ラッパーのパスは実プロジェクトに合わせる。パッケージ導入時に利用者の AGENTS.md を自動上書きしない。
+
+### uGUI の実座標による反応検証
+
+`describe tool:ui_pointer` で仕様を確認してから、Play Mode の Game View 座標（左下原点）を渡す。
+`inspect` は EventSystem の Raycast 上位候補を返す。`down` → `up` は別フレームの押下・解放を送り、両方の最上位クリック先が一致した場合だけクリックする。`click` は同一フレームの押下・解放。Button.onClick の直接呼び出しではないため、手前の暗幕、Raycast 無効、表示領域外などを検証できる。ドラッグ・スクロール・マルチタッチは対象外。
+
+処理は Game View の画面サイズが有効なゲームフレームへ予約される。`_mcp_status: pending` の場合は同じツールの `{"action":"status"}` を取得する。Editor を前面にするか対象アプリの `runInBackground` を有効にし、ポーズを解除する。検証時の一時設定は終了時に戻す。

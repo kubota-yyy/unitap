@@ -2,7 +2,8 @@
     "name": "Unitap",
     "rootNamespace": "Unitap",
     "references": [
-        "Unity.ugui"
+        "Unity.ugui",
+        "Unitap.Runtime"
     ],
     "includePlatforms": [
         "Editor"
