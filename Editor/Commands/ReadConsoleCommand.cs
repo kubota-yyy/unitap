@@ -15,7 +15,7 @@ namespace Unitap.Commands
             var typeFilter = request.Params?["type"]?.ToString();
             var limit = request.Params?["limit"]?.ToObject<int>() ?? 200;
             var sinceLastClear = request.Params?["sinceLastClear"]?.ToObject<bool>() ?? false;
-            var sinceRaw = request.Params?["since"]?.ToObject<string>();
+            var sinceToken = request.Params?["since"];
             var normalizedTypeFilter = typeFilter?.ToLowerInvariant();
 
             LogType? logType = normalizedTypeFilter switch
@@ -29,10 +29,25 @@ namespace Unitap.Commands
             };
 
             DateTime? sinceUtc = null;
-            if (!string.IsNullOrEmpty(sinceRaw)
-                && DateTime.TryParse(sinceRaw, null, DateTimeStyles.RoundtripKind, out var parsedSince))
+            // Json.NET は ISO8601 文字列を受信時に DateTime へ変換する。ToObject<string>() で文字列に戻すと
+            // "Z" が落ちてローカル時刻として再解釈され、JST では 9 時間早い時刻で絞り込まれていた。
+            if (sinceToken != null && sinceToken.Type == Newtonsoft.Json.Linq.JTokenType.Date)
             {
-                sinceUtc = parsedSince.ToUniversalTime();
+                var parsed = sinceToken.ToObject<DateTime>();
+                sinceUtc = parsed.Kind == DateTimeKind.Unspecified
+                    ? DateTime.SpecifyKind(parsed, DateTimeKind.Utc)
+                    : parsed.ToUniversalTime();
+            }
+            else
+            {
+                var sinceRaw = sinceToken?.ToString();
+                if (!string.IsNullOrEmpty(sinceRaw)
+                    && DateTime.TryParse(sinceRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsedSince))
+                {
+                    sinceUtc = parsedSince.Kind == DateTimeKind.Unspecified
+                        ? DateTime.SpecifyKind(parsedSince, DateTimeKind.Utc)
+                        : parsedSince.ToUniversalTime();
+                }
             }
 
             if (sinceLastClear && console != null)

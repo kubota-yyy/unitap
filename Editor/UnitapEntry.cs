@@ -54,6 +54,7 @@ namespace Unitap
             Shutdown(deleteHeartbeat: false); // 既存インスタンスを破棄（heartbeatファイルは残す）
 
             _console = new UnitapConsoleCapture();
+            _console.Restore(ConsoleBufferPath);
             _console.Start();
 
             if (!TryStartHost(out _host, out var hostStartError))
@@ -218,8 +219,12 @@ namespace Unitap
         }
 
         static void OnQuitting() => Shutdown(deleteHeartbeat: true);
+        // Play 開始/停止・コンパイルのドメインリロードでメモリ上のログが消えるため、Library に退避する。
+        static string ConsoleBufferPath => System.IO.Path.GetFullPath(System.IO.Path.Combine(Application.dataPath, "..", "Library", "Unitap", "console-buffer.json"));
+
         static void OnBeforeAssemblyReload()
         {
+            _console?.Persist(ConsoleBufferPath);
             _heartbeat?.WriteReloading();
             Shutdown(deleteHeartbeat: false);
         }

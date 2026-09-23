@@ -782,6 +782,75 @@ def do_wait_fsm(args, port: int) -> None:
         sys.exit(1)
 
 
+def wait_for_result_file(args, port: int, status_fn=None, console_fn=None, now_fn=time.time, sleep_fn=time.sleep) -> dict:
+    """Wait for a QA script's done/fail file, but stop as soon as waiting can no longer succeed.
+
+    Ends early on: the fail file, a new console error/exception, Play Mode exiting (--require-playing),
+    or the progress file going stale (--progress/--stall). A plain timeout is the last resort.
+    """
+    status_fn = status_fn or (lambda: send_unitap_sync(args, port, "status", {}, timeout_ms=3000, retryable=True))
+    console_fn = console_fn or (lambda since: send_unitap_sync(
+        args, port, "read_console", {"type": "error", "since": since, "limit": 5}, timeout_ms=3000, retryable=True))
+    started = now_fn()
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started - 1))
+    timeout = max(float(args.timeout), 1.0)
+    interval = max(float(args.poll_interval), 0.2)
+    stall = float(args.stall) if args.stall else 0
+    polls = 0
+    seen_playing = False
+
+    def finish(reason, **extra):
+        return dict({"done": reason == "done", "reason": reason, "elapsedSeconds": round(now_fn() - started, 2), "polls": polls}, **extra)
+
+    def head(path, limit=2000):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return f.read(limit)
+        except OSError:
+            return ""
+
+    while True:
+        polls += 1
+        if os.path.exists(args.done):
+            return finish("done", content=head(args.done, 500))
+        if args.fail and os.path.exists(args.fail):
+            return finish("failure_file", content=head(args.fail))
+        try:
+            status = status_fn()
+        except Exception:
+            status = {}
+        state = status.get("result", {}) if isinstance(status, dict) and status.get("ok") else None
+        if state is not None:
+            playing = bool(state.get("isPlaying"))
+            seen_playing = seen_playing or playing
+            if args.require_playing and not playing and not state.get("isCompiling") and not state.get("isUpdating"):
+                return finish("play_mode_exited" if seen_playing else "not_playing", editor=state)
+        if not args.ignore_errors:
+            try:
+                console = console_fn(since)
+            except Exception:
+                console = {}
+            entries = console.get("result", {}).get("entries", []) if isinstance(console, dict) and console.get("ok") else []
+            if entries:
+                return finish("console_error", errors=[{"type": e.get("type"), "message": (e.get("message") or "")[:500],
+                                                         "stackTrace": (e.get("stackTrace") or "")[:1200]} for e in entries])
+        if stall and args.progress:
+            last = os.path.getmtime(args.progress) if os.path.exists(args.progress) else started
+            if now_fn() - max(last, started) > stall:
+                lines = head(args.progress, 20000).strip().splitlines()
+                return finish("stalled", lastProgress=lines[-1] if lines else "", staleSeconds=round(now_fn() - max(last, started), 1))
+        if now_fn() - started >= timeout:
+            return finish("timeout")
+        sleep_fn(interval)
+
+
+def do_wait_result(args, port: int) -> None:
+    result = wait_for_result_file(args, port)
+    print_unitap_response(args, {"ok": True, "result": result})
+    if not result.get("done"):
+        sys.exit(1)
+
+
 def do_play(args, port: int) -> None:
     output: dict = {}
 

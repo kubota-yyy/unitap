@@ -42,6 +42,7 @@ from .commands import (
     do_sync_command,
     do_wait_fsm,
     do_wait_idle,
+    do_wait_result,
 )
 
 # Extension point: loaded if unitap_ext package is available on sys.path
@@ -286,6 +287,19 @@ def build_parser():
     p_wait_fsm.add_argument("--timeout", type=float, default=20.0, help="Timeout in seconds")
     p_wait_fsm.add_argument("--poll-interval", type=float, default=0.2, help="Poll interval in seconds")
 
+    p_wait_result = subparsers.add_parser(
+        "wait_result",
+        help="Wait for a QA script's done/fail file; stop early on console errors, Play Mode exit or stale progress",
+    )
+    p_wait_result.add_argument("--done", required=True, help="File the script writes when it finished")
+    p_wait_result.add_argument("--fail", default=None, help="File the script writes on failure (its text is returned)")
+    p_wait_result.add_argument("--progress", default=None, help="File the script appends to while it runs")
+    p_wait_result.add_argument("--stall", type=float, default=0, help="Fail when --progress is not updated for this many seconds")
+    p_wait_result.add_argument("--require-playing", action="store_true", help="Fail as soon as Play Mode is not running")
+    p_wait_result.add_argument("--ignore-errors", action="store_true", help="Do not stop on new console errors/exceptions")
+    p_wait_result.add_argument("--timeout", type=float, default=300.0, help="Last-resort timeout in seconds")
+    p_wait_result.add_argument("--poll-interval", type=float, default=2.0, help="Poll interval in seconds")
+
     p_console = subparsers.add_parser("read_console", help="Read and filter captured Unity console messages")
     p_console.add_argument("--type", default=None, help="error|warning|log")
     p_console.add_argument("--limit", type=int, default=200)
@@ -428,6 +442,7 @@ def build_parser():
         "focus": lambda args, port: do_focus(args),
         "wait_idle": do_wait_idle,
         "wait_fsm": do_wait_fsm,
+        "wait_result": do_wait_result,
         "play": do_play,
         "compile_check": do_compile_check,
         "capture": do_capture,

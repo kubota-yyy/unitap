@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Add `wait_result`: wait for a QA script's done/fail file and stop early on new console errors, Play Mode exit (`--require-playing`) or a stale progress file (`--progress --stall`).
+- Keep captured console logs across domain reloads (Play enter/exit, compilation) so Play Mode exceptions stay readable after stopping.
+- Fix `read_console --since` dropping the UTC `Z` (Json.NET date conversion) and filtering 9 hours early in JST; apply type filters before `--limit`.
 - Add Codex discovery: offline `commands`, live cross-backend search, and `describe` parameter/response schemas including project extensions.
 - Add `exec` / `eval` aliases sharing the UniCLI bridge, project locks and redacted request history; allow connection and catalog reads during exclusive operations.
 - Consolidate C# tool discovery and invocation using Unity TypeCache; document parameters for all 12 built-in tools and reject duplicate tool names.

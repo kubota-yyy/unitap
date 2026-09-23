@@ -58,6 +58,9 @@ UniCLI コマンドの引数調査には `describe unicli:NAME` を使う。`exe
 - ビルドは返却結果とローカル成果物、画面変更は保存 capture の目視まで確認する。
 - pending / jobId は開始の証拠であり完了ではない。該当ツールの polling スキーマに従う。プロジェクト固有の `run_automate_test` / `run_playmode_test` ラッパーは、カタログに存在するときだけ利用する。
 - タイムアウト後も Unity 側処理が継続する場合がある。状態・ログを調べ、同じ変更を自動再送しない。別バックエンドによる同一操作の再送もしない。
+- メニュー等で開始した Play Mode の QA スクリプトは、完了ファイルを固定時間 polling せず `wait_result` で待つ。例: `unitap --json wait_result --done <dir>/done.txt --fail <dir>/failure.txt --progress <dir>/progress.txt --stall 30 --require-playing --timeout 300`。新しいコンソールエラー、Play Mode の終了、進捗ファイルの停滞、失敗ファイルのいずれかで即座に終了し、`result.reason` に理由（`done` / `failure_file` / `console_error` / `play_mode_exited` / `not_playing` / `stalled` / `timeout`）を返す。スクリプト側は各段階で進捗ファイルに追記する。
+- Unity は入れ子のコルーチン（`yield return OtherEnumerator()`）内の例外をログに出すだけで、親は再開も失敗もしない。QA スクリプトの外側で try/catch する場合は、入れ子の IEnumerator も自前で MoveNext して例外を失敗ファイルに書く。
+- `read_console` のログはドメインリロード（Play の開始・停止、コンパイル）をまたいで保持される。`compile_check` は実行時にクリアする。`--since` は UTC の ISO8601（`Z` 付き）で指定する。
 - UniCLI eval がコンパイルに失敗したらエラーを確認し、必要に応じて `compile_check` 後に状態を再確認する。eval のコード変更と Editor の復旧を区別する。
 
 `exec` / `eval` は既存の `Library/Unitap/.editor-op.lock` を保持し、同じ正規化プロジェクトをロック・cwd・`UNICLI_PROJECT` に使う。汎用コマンドの副作用は自動推測せず、全 exec / eval を排他にする。`unicli check/status/commands` と機能探索はロックを取得しない。独自ツールの排他は既存のツール別ポリシーに従い、カタログの `lockPolicy` に表示する。
