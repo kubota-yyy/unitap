@@ -84,7 +84,9 @@ def package_git_state(package_root: Path) -> dict:
     if superproject:
         rel = os.path.relpath(own_top or str(package_root), superproject)
         pinned = _git(Path(superproject), "ls-tree", "HEAD", "--", rel)
-        pinned_sha = pinned.split()[2] if pinned and len(pinned.split()) >= 3 else None
+        fields = pinned.split() if pinned else []
+        # gitlink (160000) の時だけ比較する。未 commit の submodule 追加や vendor 置換中は tree になる。
+        pinned_sha = fields[2] if len(fields) >= 3 and fields[0] == "160000" else None
         state.update({
             "layout": "submodule",
             "superproject": superproject,
