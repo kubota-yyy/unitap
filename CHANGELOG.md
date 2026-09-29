@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Single source of truth: consumers pin this repository as a `<repo>/unitap` submodule and run `<repo>/scripts/unitap`. Commands fail with `unitap_copy_mismatch` when the CLI is not the copy the project's Unity loads (`UNITAP_ALLOW_FOREIGN_CLI=1` overrides); `doctor` reports the CLI/package link, the pinned vs checked-out submodule commit and dirty state.
+- `clone create` checks out submodules (e.g. unitap itself) locally in the clone, and `clone remove` refuses to drop unpushed submodule work.
 - Run several Unity Editors side by side: `launch` no longer aborts when another project's Editor is running and only terminates this project's Editor (`--kill-all` is an explicit opt-in; `--kill-project-only` is now the default and kept for compatibility).
 - `launch --restart` restarts only an unresponsive Editor (stale or frozen heartbeat); add `--force-restart` to restart a healthy one.
 - Match Unity processes by exact `-projectPath` (a sibling such as `game--clone` no longer matches `game`, paths with spaces are parsed); focus only the target project's PID instead of falling back to any Unity.

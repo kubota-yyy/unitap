@@ -34,6 +34,7 @@ from .unicli_bridge import register as register_unicli
 from .discovery import register as register_discovery
 from .session_commands import register as register_session_commands
 from .clone import register as register_clone
+from .identity import ALLOW_FOREIGN_ENV, check_cli_identity, foreign_cli_allowed
 from .lease import (
     EditorLeasedError,
     clear_play_owner,
@@ -203,10 +204,12 @@ def _should_skip_polling_history(args) -> bool:
 
 
 # project 未指定でも動く (実行中 Editor からの推測もしない) コマンド
-_PROJECT_OPTIONAL_COMMANDS = ("commands", "describe", "editors")
+_PROJECT_OPTIONAL_COMMANDS = ("commands", "describe", "editors", "doctor")
+# CLI と対象プロジェクトの unitap コピーの一致確認を省くコマンド (診断・探索用)
+_IDENTITY_CHECK_EXEMPT_COMMANDS = ("commands", "describe", "editors", "doctor")
 # Unity のダイアログ監視 (osascript) を起動しないコマンド
 _NO_DIALOG_WATCH_COMMANDS = (
-    "focus", "unicli", "exec", "eval", "commands", "describe", "editors", "lease", "clone", "quit",
+    "focus", "unicli", "exec", "eval", "commands", "describe", "editors", "lease", "clone", "quit", "doctor",
 )
 
 
@@ -635,6 +638,22 @@ def main():
 
     if resolved_project:
         args.project = str(resolved_project)
+
+    if args.command not in _IDENTITY_CHECK_EXEMPT_COMMANDS and not foreign_cli_allowed():
+        identity = check_cli_identity(resolved_project)
+        if identity.get("matches") is False:
+            _print_cli_error(
+                args,
+                "unitap_copy_mismatch",
+                "This unitap CLI is not the copy the project's Unity loads. Use the project's own unitap "
+                "(its submodule / wrapper) so the CLI and Editor code match.",
+                {
+                    "cliRoot": identity.get("cliRoot"),
+                    "projectPackage": identity.get("projectPackage"),
+                    "override": f"{ALLOW_FOREIGN_ENV}=1",
+                },
+            )
+            sys.exit(1)
 
     # Unity may show native modal dialogs while compiling, refreshing, or
     # reloading scenes. Keep the known-dialog dismisser alive around editor

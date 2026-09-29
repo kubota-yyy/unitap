@@ -4,6 +4,7 @@
 - 最初に `unitap --json commands`、接続後に `unitap --json commands --live --search <用途>` で実際に利用できる機能を調べる。`unitap` はプロジェクトのラッパーまたは `python3 /path/to/unitap/cli/unitap.py --project /path/to/UnityProject` を意味する。
 - `unitap --json describe <一覧のid>` で引数・既定値・返却型を確認してから使う。詳細な操作手順・失敗時の扱いは [docs/agent-guide.md](docs/agent-guide.md)。
 - UniCLI の操作も `unitap exec` / `unitap eval` / `unitap unicli` を通す。既存のロック、プロジェクト指定、履歴を迂回しない。
+- unitap は各利用リポジトリの `unitap/` submodule（正本 kubota-yyy/unitap）として使う。vendor コピーや別プロジェクトの unitap を使わない。変更は利用側 submodule 内のブランチで行い、unitap を push してから親のポインタを commit する。導入・更新手順は [docs/agent-guide.md](docs/agent-guide.md)。
 - 同じ Mac で複数 Editor・複数セッションが動く前提で扱う。`--project` の Editor 以外を終了・前面化しない（`launch --kill-all` は明示依頼時のみ）。同一プロジェクトの連続操作は `lease`、並行作業は `clone` を使う。手順は [docs/agent-guide.md](docs/agent-guide.md) の「複数 Editor・複数セッション」。
 - 新機能は実際の CLI パーサーまたは C# ツール属性に登録し、探索結果から見える状態を維持する。一覧用の別のコマンド名リストを作らない。
 - Python の検証は `PYTHONPATH=cli python3 -m unittest discover -s cli/tests -q`。C# 変更は対象 Editor で `compile_check` と変更したツールの実行結果を確認する。

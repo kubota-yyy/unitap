@@ -7,6 +7,7 @@ from pathlib import Path
 from .commands import print_unitap_response
 from .editor_lock import get_editor_operation_lock_snapshot
 from .heartbeat import check_heartbeat_fresh, find_heartbeat
+from .identity import check_cli_identity, cli_package_root, package_git_state
 from .lease import (
     DEFAULT_LEASE_TTL_SECONDS,
     EditorLeasedError,
@@ -38,6 +39,13 @@ def register(subparsers, dispatch_table) -> None:
     )
     p_editors.set_defaults(_skip_heartbeat=True, _skip_history=True)
     dispatch_table["editors"] = do_editors
+
+    p_doctor = subparsers.add_parser(
+        "doctor",
+        help="Check that this CLI is the project's own unitap copy (submodule pinned commit, dirty state, Editor link)",
+    )
+    p_doctor.set_defaults(_skip_heartbeat=True, _skip_history=True)
+    dispatch_table["doctor"] = do_doctor
 
     p_quit = subparsers.add_parser(
         "quit",
@@ -175,3 +183,49 @@ def do_quit(args, _port=None) -> None:
         return
     print(f"Quit Unity for {project_root}: {killed}", file=sys.stderr)
     print_unitap_response(args, {"ok": True, "result": {"quit": True, "pids": killed, "projectPath": str(project_root)}})
+
+
+def do_doctor(args, _port=None) -> None:
+    project_root = Path(args.project) if getattr(args, "project", None) else None
+    identity = check_cli_identity(project_root)
+    package = package_git_state(cli_package_root())
+    problems: list[str] = []
+    warnings: list[str] = []
+    if project_root is None:
+        warnings.append("No Unity project resolved; pass --project to check the project link.")
+    elif identity.get("projectPackage") is None:
+        warnings.append("The project does not reference com.nilone.unitap in Packages/manifest.json.")
+    elif identity.get("matches") is False:
+        problems.append(
+            f"This CLI ({identity['cliRoot']}) is not the unitap the project loads "
+            f"({identity['projectPackage'].get('root')}). Use the project's own wrapper/submodule."
+        )
+    if package.get("layout") == "submodule" and package.get("matchesPinned") is False:
+        problems.append(
+            f"Submodule checkout {str(package.get('head'))[:10]} differs from the commit pinned by the parent repo "
+            f"{str(package.get('pinned'))[:10]}. Run `git submodule update --init` or commit the new pointer."
+        )
+    if package.get("layout") == "standalone-clone":
+        warnings.append("unitap is a standalone clone, not a submodule pinned by the project repository.")
+    if package.get("dirty"):
+        warnings.append("unitap has uncommitted changes.")
+    heartbeat = None
+    if project_root is not None:
+        hb = find_heartbeat(str(project_root))
+        if hb:
+            heartbeat = {"fresh": check_heartbeat_fresh(hb), "pid": hb.get("pid"), "unityVersion": hb.get("unityVersion")}
+    payload = {
+        "ok": not problems,
+        "result": {
+            "healthy": not problems,
+            "problems": problems,
+            "warnings": warnings,
+            "identity": identity,
+            "package": package,
+            "heartbeat": heartbeat,
+            "python": sys.version.split()[0],
+        },
+    }
+    if problems:
+        payload["error"] = {"code": "unitap_doctor_failed", "message": "; ".join(problems)}
+    print_unitap_response(args, payload)

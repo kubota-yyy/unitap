@@ -40,6 +40,17 @@ Unitap is designed for **resilience in hostile conditions** — compilation paus
 
 ## Installation
 
+### Recommended: git submodule (one source, pinned per project)
+
+Every consuming repository pins this repository as a submodule at `<repo>/unitap`, references it with a relative `file:` path and runs the CLI through `<repo>/scripts/unitap`. Do not vendor copies or point a project at another project's checkout; `doctor` and every command check that the CLI is the copy the project's Unity loads (`unitap_copy_mismatch`). See [docs/agent-guide.md](docs/agent-guide.md) for setup, updates and how to develop unitap from inside a consumer.
+
+```sh
+git submodule add git@github.com:kubota-yyy/unitap.git unitap
+git config submodule.recurse true
+# Packages/manifest.json: "com.nilone.unitap": "file:../unitap"   (relative to Packages/)
+scripts/unitap --json doctor
+```
+
 ### Unity Package Manager (UPM)
 
 Add to your `Packages/manifest.json`:

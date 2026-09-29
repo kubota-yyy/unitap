@@ -162,6 +162,69 @@ def _populate_worktree(repo_root: Path, dest_repo: Path, include_uncommitted: bo
     return {"cloned": cloned, "copied": copied}
 
 
+def _gitlinks(repo_root: Path) -> list[tuple[str, str]]:
+    """HEAD の submodule (mode 160000) を (path, commit) で返す。"""
+    result = subprocess.run(["git", "-C", str(repo_root), "ls-tree", "-r", "-z", "HEAD"], capture_output=True, check=False)
+    links = []
+    for item in result.stdout.split(b"\0"):
+        if not item:
+            continue
+        meta, _, name = item.partition(b"\t")
+        parts = meta.split()
+        if len(parts) == 3 and parts[0] == b"160000":
+            links.append((os.fsdecode(name), parts[2].decode()))
+    return links
+
+
+def _checkout_submodules(repo_root: Path, dest_repo: Path, include_uncommitted: bool) -> list[str]:
+    """submodule を元のチェックアウトからローカル clone する (ネットワーク不要)。
+
+    unitap のような file: パッケージが submodule の場合、これが無いと複製先で解決できない。
+    """
+    notes = []
+    for rel, pinned in _gitlinks(repo_root):
+        src = repo_root / rel
+        dest = dest_repo / rel
+        if not (src / ".git").exists():
+            notes.append(f"submodule {rel}: not initialized in the source; skipped")
+            continue
+        if dest.exists():
+            shutil.rmtree(dest)
+        result = _run(["git", "clone", "--quiet", "--local", "--no-checkout", str(src), str(dest)])
+        if result.returncode != 0:
+            raise RuntimeError(f"submodule clone failed for {rel}: {result.stderr.strip()}")
+        target = pinned
+        if include_uncommitted:
+            target = _run(["git", "-C", str(src), "rev-parse", "HEAD"]).stdout.strip() or pinned
+        result = _run(["git", "-C", str(dest), "checkout", "--quiet", "--detach", target])
+        if result.returncode != 0:
+            raise RuntimeError(f"submodule checkout failed for {rel}: {result.stderr.strip()}")
+        origin = _run(["git", "-C", str(src), "remote", "get-url", "origin"]).stdout.strip()
+        if origin:
+            _run(["git", "-C", str(dest), "remote", "set-url", "origin", origin])
+        notes.append(f"submodule {rel} at {target[:10]}")
+    return notes
+
+
+def _nested_repo_problems(repo_root: Path) -> list[str]:
+    """clone 内の submodule に、削除すると失われる作業 (未コミット・未 push コミット) が無いか。"""
+    problems = []
+    for rel, pinned in _gitlinks(repo_root):
+        sub = repo_root / rel
+        if not (sub / ".git").exists():
+            continue
+        if _git_lines(sub, "status", "--porcelain"):
+            problems.append(f"{rel}: uncommitted changes")
+        local_only = _git_lines(sub, "log", "--oneline", "--branches", "--not", "--remotes")
+        if local_only:
+            problems.append(f"{rel}: {len(local_only)} local branch commit(s) not pushed")
+        head = _run(["git", "-C", str(sub), "rev-parse", "HEAD"]).stdout.strip()
+        detached = _run(["git", "-C", str(sub), "symbolic-ref", "-q", "HEAD"]).returncode != 0
+        if detached and head and head != pinned and not _git_lines(sub, "branch", "--all", "--contains", head):
+            problems.append(f"{rel}: detached commit {head[:10]} is not on any branch")
+    return problems
+
+
 def _reset_library_state(project: Path) -> list[str]:
     removed = []
     library = project / "Library"
@@ -271,6 +334,8 @@ def create_clone(
             raise RuntimeError(f"git worktree add failed: {result.stderr.strip() or result.stdout.strip()}")
         counts = _populate_worktree(repo_root, dest_repo, include_uncommitted)
         steps.append(f"git worktree add (files: {counts['cloned']} cloned, {counts['copied']} copied)")
+        for note in _checkout_submodules(repo_root, dest_repo, include_uncommitted):
+            (warnings if "skipped" in note else steps).append(note)
         if counts["copied"]:
             warnings.append(f"{counts['copied']} file(s) were copied without APFS clonefile.")
 
@@ -380,6 +445,9 @@ def remove_clone(src: Path, target: Path, *, force: bool = False) -> dict:
     git_root = Path(marker["gitRoot"]) if marker.get("gitRoot") else None
     check_root = git_root or (target if (target / ".git").exists() else None)
     if check_root is not None and not force:
+        nested = _nested_repo_problems(check_root)
+        if nested:
+            raise RuntimeError("Submodule work would be lost: " + "; ".join(nested) + ". Push it or pass --force.")
         dirty = _git_lines(check_root, "status", "--porcelain", "--untracked-files=normal")
         if dirty:
             raise RuntimeError(

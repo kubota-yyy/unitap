@@ -4,7 +4,7 @@ Unitap を Unity 操作の共通入口にする。Unity の診断・コンパイ
 
 ## 最初に機能を調べる
 
-以下の `unitap` はプロジェクトのラッパーを指す。ラッパーがなければ `python3 /path/to/unitap/cli/unitap.py --project /absolute/UnityProject` に置き換える。dogma ではリポジトリルートの `scripts/unitap` を使う。
+以下の `unitap` はプロジェクトのラッパー（リポジトリ直下の `scripts/unitap`）を指す。導入規約は「プロジェクトへの導入・更新・開発」節。
 
 ```sh
 # Unity 未起動・UniCLI 未導入でも CLI 自体の一覧が得られる
@@ -119,13 +119,41 @@ public static class MyTool
 
 クラスへの `UnitapToolParameter` は JObject 引数を文書化するための属性であり、入力の検証や既定値の設定はハンドラー側の責任。既存のフィールド・プロパティ用 `ToolParameterAttribute` も利用できる。`tool_list` / `list_custom_tools` / `tool_exec` は同じレジストリを参照する。重複名の実行は `ambiguous_tool` で失敗し、候補クラスを返す。プロジェクトの独自ツールが属性を持たない場合は引数一覧が空になるため、そのツールのソースやプロジェクト文書を確認する。
 
-## 利用プロジェクトから発見できるようにする
+## プロジェクトへの導入・更新・開発（1 つの正本を submodule で使う）
 
-UPM パッケージ内の AGENTS.md が、利用プロジェクトルートで作業する Codex に必ず読み込まれるとは限らない。利用プロジェクトの AGENTS.md に、既存の Unitap ラッパーと次の案内を置く。
+unitap の正本は `git@github.com:kubota-yyy/unitap.git` だけ。各プロジェクトはこれを **git submodule として固定したコミット**で使い、ファイルのコピー（vendor）や別プロジェクトの unitap の参照をしない。
 
-> Unity 操作は `scripts/unitap` を使う。まず `scripts/unitap --json commands --live --search <用途>`、次に `scripts/unitap --json describe <id>` で利用可能な操作と引数を確認する。UniCLI も `scripts/unitap exec` / `eval` 経由で使う。
+| 項目 | 規約 |
+|---|---|
+| 置き場所 | Unity プロジェクトを含む git リポジトリの直下 `unitap/`（submodule） |
+| Unity からの参照 | `Packages/manifest.json` の `"com.nilone.unitap": "file:<Packages から unitap への相対パス>"`。例: リポジトリ直下が Unity プロジェクトなら `file:../unitap`、`<repo>/game/` なら `file:../../unitap` |
+| 実行入口 | リポジトリ直下の `scripts/unitap`（`--project` を固定したラッパー）。プロジェクト拡張（`unitap_ext`）はラッパーが読み込む |
+| 一致確認 | `scripts/unitap --json doctor`。CLI と Unity が読むコピーが違うと各コマンドは `unitap_copy_mismatch` で止まる |
 
-ラッパーのパスは実プロジェクトに合わせる。パッケージ導入時に利用者の AGENTS.md を自動上書きしない。
+導入（新しいプロジェクト）:
+
+```sh
+git -C <repo> submodule add git@github.com:kubota-yyy/unitap.git unitap
+git -C <repo> config submodule.recurse true          # pull/checkout で submodule も追従（各 clone で 1 回）
+# Packages/manifest.json に "com.nilone.unitap": "file:../unitap"（相対パスは配置に合わせる）
+mkdir -p <repo>/scripts && cat > <repo>/scripts/unitap <<'SH'
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec python3 "$ROOT/unitap/cli/unitap.py" --project "$ROOT/<unity-project-dir>" "$@"
+SH
+chmod +x <repo>/scripts/unitap && <repo>/scripts/unitap --json doctor
+```
+
+別マシン・新しい clone では `git submodule update --init unitap`。`doctor` が `matchesPinned: false` を返したら、親が固定したコミットと実際のチェックアウトがずれている。
+
+更新（新しい unitap を取り込む）: `git -C <repo> submodule update --remote unitap` → `scripts/unitap --json compile_check` と主要な確認 → 親リポジトリで `unitap`（ポインタ）と必要なら `packages-lock.json` を commit。各プロジェクトは自分の都合の良い時に更新する。
+
+unitap 自体を変更する: そのプロジェクトの `unitap/` の中でブランチを切って編集・テスト（`PYTHONPATH=cli python3 -m unittest discover -s cli/tests -q`）・commit し、unitap を push してから親のポインタを commit する。C# を変えると、その unitap を読む開いている Editor がすべて再コンパイルされるため、作業中の Editor に影響させたくない場合は `clone create` した複製で検証する。他プロジェクトへコピーして直さない。
+
+UPM パッケージ内の AGENTS.md が、利用プロジェクトで作業するエージェントに読み込まれるとは限らない。利用プロジェクトの AGENTS.md / CLAUDE.md に次を置く（パッケージ導入時に自動上書きしない）。
+
+> Unity 操作はこのリポジトリの `scripts/unitap` だけを使う（unitap は `unitap/` の submodule。他プロジェクトや別コピーの unitap を使わない・コピーしない）。まず `scripts/unitap --json commands --live --search <用途>`、`describe <id>` で操作と引数を確認する。複数 Editor・複数セッションの規約は `unitap/docs/agent-guide.md`。
 
 ### uGUI の実座標による反応検証
 
