@@ -103,7 +103,7 @@ unitap --json --project <clone> quit
 unitap --json clone remove --dest <clone>                 # 未コミット変更・未参照コミットがあれば拒否
 ```
 
-複製は ProjectSettings（companyName / productName）が元と同じため、Play Mode の PlayerPrefs と `Application.persistentDataPath` を元の Editor と共有する。セーブデータを書き換える Play 検証を並行させる場合は、プロジェクト側の隔離手段（検証用データ保存先など）を使う。clone の実機ビルド・アプリ ID の扱いは利用プロジェクトの規約に従う。compile_check は Play Mode を止めてから実行するが、別セッションが `play` した Play Mode は止めずに `play_mode_in_use` で失敗する（止めてよい場合だけ `--stop-foreign-play`）。
+gitignore 済みで Unity が必要とするファイル（SDK・symlink 等）も複製し、元リポジトリ内を絶対パスで指す symlink は複製内の同じ場所へ張り替える（元のファイルを複製の Editor が書き換えないため）。元の外を指す symlink は共有のまま残り、`warnings` に件数が出る。複製は ProjectSettings（companyName / productName）が元と同じため、Play Mode の PlayerPrefs と `Application.persistentDataPath` を元の Editor と共有する。セーブデータを書き換える Play 検証を並行させる場合は、プロジェクト側の隔離手段（検証用データ保存先など）を使う。clone の実機ビルド・アプリ ID の扱いは利用プロジェクトの規約に従う。compile_check は Play Mode を止めてから実行するが、別セッションが `play` した Play Mode は止めずに `play_mode_in_use` で失敗する（止めてよい場合だけ `--stop-foreign-play`）。
 
 ## 独自ツールにも説明を付ける
 

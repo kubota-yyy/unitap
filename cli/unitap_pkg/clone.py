@@ -226,6 +226,39 @@ def _nested_repo_problems(repo_root: Path) -> list[str]:
     return problems
 
 
+def _retarget_symlinks(dest_project: Path, roots: list[tuple[Path, Path]]) -> dict:
+    """複製内の絶対パス symlink が元を指していたら、複製内の同じ場所へ張り替える。
+
+    そのままだと複製の Editor が元リポジトリのファイルを読み込み、.meta 等を元へ書き込む。
+    """
+    retargeted = 0
+    external: list[str] = []
+    for top in ("Assets", "Packages", "ProjectSettings"):
+        base = dest_project / top
+        if not base.is_dir():
+            continue
+        for folder, dirs, names in os.walk(base, followlinks=False):
+            for name in [*dirs, *names]:
+                link = Path(folder) / name
+                if not link.is_symlink():
+                    continue
+                target = os.readlink(link)
+                if not os.path.isabs(target):
+                    continue
+                for src_root, dst_root in roots:
+                    try:
+                        rel = Path(target).relative_to(src_root)
+                    except ValueError:
+                        continue
+                    link.unlink()
+                    os.symlink(str(dst_root / rel), link)
+                    retargeted += 1
+                    break
+                else:
+                    external.append(str(link.relative_to(dest_project)))
+    return {"retargeted": retargeted, "external": external}
+
+
 def _reset_library_state(project: Path) -> list[str]:
     removed = []
     library = project / "Library"
@@ -364,6 +397,16 @@ def create_clone(
                 continue
             methods.add(clone_tree(entry, dest_project / entry.name))
         steps.append(f"snapshot copy ({'/'.join(sorted(methods)) or 'empty'})")
+
+    link_roots = [(repo_root, dest_repo)] if mode == "worktree" else [(src, dest_project)]
+    links = _retarget_symlinks(dest_project, link_roots)
+    if links["retargeted"]:
+        steps.append(f"retargeted {links['retargeted']} absolute symlink(s) from the source into the clone")
+    if links["external"]:
+        warnings.append(
+            f"{len(links['external'])} absolute symlink(s) point outside the source and stay shared with it, "
+            f"e.g. {links['external'][0]}"
+        )
 
     if copy_library and (src / "Library").is_dir():
         if list_unity_processes(src):

@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -79,6 +80,28 @@ class SubmoduleCloneTests(unittest.TestCase):
                 self.assertIn("unitap", str(raised.exception))
                 clone.remove_clone(project, cloned, force=True)
             self.assertFalse((tmp / "repo--s2").exists())
+
+
+class SymlinkCloneTests(unittest.TestCase):
+    def test_absolute_symlinks_into_the_source_are_retargeted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp).resolve()
+            repo = tmp / "repo"
+            (repo / "master" / "gacha").mkdir(parents=True)
+            (repo / "master" / "gacha" / "a.png").write_text("png")
+            project = _make_project(repo / "game", None)
+            (repo / ".gitignore").write_text("Library/\ngame/Assets/MasterDB/\n")
+            _git(repo, "init", "-q")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-qm", "init")
+            (project / "Assets" / "MasterDB").mkdir()
+            (project / "Assets" / "MasterDB" / "gacha").symlink_to(repo / "master" / "gacha")
+            (project / "Assets" / "MasterDB" / "shared").symlink_to(tmp)
+            with patch.object(clone, "list_unity_processes", return_value=[]):
+                result = clone.create_clone(project, label="links", copy_library=False)
+            link = Path(result["projectPath"]) / "Assets" / "MasterDB" / "gacha"
+            self.assertEqual(str(tmp / "repo--links" / "master" / "gacha"), os.readlink(link))
+            self.assertTrue(any("outside the source" in w for w in result["warnings"]))
 
 
 if __name__ == "__main__":
