@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .lease import resolve_session_owner
 from .project import resolve_project_root
 
 
@@ -90,12 +92,62 @@ def get_async_job_history_path(project_path: str | None) -> Path | None:
     return unitap_dir / ASYNC_JOB_HISTORY_NAME
 
 
+DEFAULT_HISTORY_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _history_max_bytes() -> int:
+    raw = os.environ.get("UNITAP_HISTORY_MAX_BYTES")
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return DEFAULT_HISTORY_MAX_BYTES
+
+
+def rotated_history_path(path: Path) -> Path:
+    """execution-history.jsonl -> execution-history.1.jsonl"""
+    return path.with_name(f"{path.stem}.1{path.suffix}")
+
+
+def rotate_jsonl_if_needed(path: Path, max_bytes: int | None = None) -> bool:
+    """上限を超えた履歴を 1 世代だけ残して切り替える。0 は無制限。"""
+    limit = _history_max_bytes() if max_bytes is None else max_bytes
+    if limit <= 0:
+        return False
+    try:
+        if path.stat().st_size <= limit:
+            return False
+    except OSError:
+        return False
+
+    from .editor_lock import _EditorOperationFileLock
+
+    # 複数プロセスが同時に rotate すると、先に作られた新ファイルを .1 に上書きして
+    # 古い履歴を失う。rotate は lock 内でサイズを取り直してから行う。
+    lock_path = path.with_name(f".{path.name}.rotate.lock")
+    try:
+        with _EditorOperationFileLock(lock_path) as lock_file:
+            if not lock_file.try_acquire():
+                return False
+            try:
+                if path.stat().st_size <= limit:
+                    return False
+                os.replace(path, rotated_history_path(path))
+                return True
+            finally:
+                lock_file.release()
+    except OSError:
+        return False
+
+
 def append_jsonl_entry(path: Path | None, payload: dict) -> None:
     if path is None:
         return
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        rotate_jsonl_if_needed(path)
         line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         with path.open("a", encoding="utf-8") as fp:
             fp.write(line)
@@ -172,6 +224,7 @@ def extract_command_context_from_args(args) -> dict:
             "forceRestart": bool(getattr(args, "force_restart", False)),
             "noKill": bool(getattr(args, "no_kill", False)),
             "killProjectOnly": bool(getattr(args, "kill_project_only", False)),
+            "killAll": bool(getattr(args, "kill_all", False)),
             "noWait": bool(getattr(args, "no_wait", False)),
             "waitTimeout": getattr(args, "wait_timeout", None),
             "ignoreCompilerErrors": bool(getattr(args, "ignore_compiler_errors", False)),
@@ -270,6 +323,10 @@ def build_execution_history_entry(
         error_code = "system_exit"
         error_message = f"Exited with status {exit_code}"
 
+    lock_metadata = getattr(args, "_lock_metadata", None)
+    lock_wait_ms = lock_metadata.get("lockWaitMs") if isinstance(lock_metadata, dict) else None
+    lease_wait_ms = getattr(args, "_lease_wait_ms", None)
+
     return {
         "source": "unitap_cli",
         "timestamp": completed_at.isoformat(),
@@ -285,6 +342,10 @@ def build_execution_history_entry(
         "transportKind": transport_kind,
         "editor": editor,
         "resultSummary": result_summary,
+        "session": resolve_session_owner(),
+        "callerPid": os.getppid(),
+        "lockWaitMs": lock_wait_ms,
+        "leaseWaitMs": lease_wait_ms,
         **context,
     }
 

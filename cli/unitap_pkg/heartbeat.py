@@ -35,11 +35,10 @@ def _heartbeat_candidates(project_path: str | None = None) -> list[Path]:
         except ProjectResolutionError:
             root = None
         if root:
-            hb = root / "Library" / "Unitap" / ".heartbeat.json"
-            key = str(hb)
-            if key not in seen:
-                candidates.append(hb)
-                seen.add(key)
+            # 明示 project が解決できたら他の候補へフォールバックしない。
+            # cwd や unitap 配置先の heartbeat を拾うと、別プロジェクトの Editor に
+            # コマンドを送ってしまう。
+            return [root / "Library" / "Unitap" / ".heartbeat.json"]
 
     # 2) unitap.py の配置パス基準
     script_root = _script_project_root()
@@ -91,12 +90,36 @@ def _load_heartbeat_json(path: Path) -> dict | None:
     return None
 
 
+def _same_path(a: str | Path, b: str | Path) -> bool:
+    try:
+        return Path(a).expanduser().resolve() == Path(b).expanduser().resolve()
+    except OSError:
+        return str(a).rstrip("/") == str(b).rstrip("/")
+
+
+def heartbeat_belongs_to(heartbeat_path: Path, data: dict) -> bool:
+    """heartbeat が置かれたプロジェクト自身の Editor が書いたものか。
+
+    Library ごとプロジェクトを複製すると、複製先に元プロジェクトの heartbeat
+    (projectPath / fileTransportDirectory が元を指す) が残る。これを使うと複製側の
+    コマンドが元の Editor に届くため、projectPath が一致しない heartbeat は無視する。
+    """
+    recorded = data.get("projectPath")
+    if not isinstance(recorded, str) or not recorded.strip():
+        return True  # 古い Editor 側実装との互換
+    try:
+        owner_root = heartbeat_path.parent.parent.parent
+    except IndexError:
+        return True
+    return _same_path(recorded, owner_root)
+
+
 def find_heartbeat(project_path: str | None = None) -> dict | None:
     """heartbeat.json を探して読み込む"""
     for path in _heartbeat_candidates(project_path):
         if path.exists():
             data = _load_heartbeat_json(path)
-            if data:
+            if data and heartbeat_belongs_to(path, data):
                 return data
     return None
 

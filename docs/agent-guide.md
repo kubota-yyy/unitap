@@ -65,7 +65,45 @@ UniCLI コマンドの引数調査には `describe unicli:NAME` を使う。`exe
 
 `exec` / `eval` は既存の `Library/Unitap/.editor-op.lock` を保持し、同じ正規化プロジェクトをロック・cwd・`UNICLI_PROJECT` に使う。汎用コマンドの副作用は自動推測せず、全 exec / eval を排他にする。`unicli check/status/commands` と機能探索はロックを取得しない。独自ツールの排他は既存のツール別ポリシーに従い、カタログの `lockPolicy` に表示する。
 
-排他は Unitap を経由する処理にのみ有効。非同期処理が開始応答を返した後までロックが継続する保証はない。履歴は `Library/Unitap/execution-history.jsonl`。exec / eval は backend・operation・コマンド名・timeout のみを要求情報に記録し、C# 本文や追加引数を記録しない。機能探索は履歴を増やさない。
+排他は Unitap を経由する処理にのみ有効。非同期処理が開始応答を返した後までロックが継続する保証はない。履歴は `Library/Unitap/execution-history.jsonl`（8MB で `.1.jsonl` に 1 世代だけ退避。`UNITAP_HISTORY_MAX_BYTES` で変更、0 で無制限）。各行にセッション ID・lock/lease 待ち時間を残す。exec / eval は backend・operation・コマンド名・timeout のみを要求情報に記録し、C# 本文や追加引数を記録しない。機能探索は履歴を増やさない。
+
+## 複数 Editor・複数セッションで使う
+
+1 台の Mac で複数プロジェクトの Editor を同時に動かしてよい。Unitap は対象を `--project` の Editor だけに限定する。
+
+- `launch` は他プロジェクトの Editor を終了しない。終了するのは同じプロジェクトの Editor だけ。別プロジェクトも止めたい場合だけ `--kill-all` を明示する（他セッションの作業を壊すため通常は使わない）。
+- `launch --restart` は heartbeat が止まった・凍結した Editor だけを再起動する。応答している Editor は `restartSkipped: true` を返して残す。健全でも再起動が必要な場合は `--restart --force-restart`。
+- Editor の終了は `quit`（このプロジェクトの Editor だけ）。`execute_menu File/Quit` は拒否される。
+- `focus` / `compile_check` の前面化は対象プロジェクトの PID だけを扱い、見つからなければ別の Unity を前面化せず失敗する。
+- `editors` でマシン上の全 Editor（プロジェクト・PID・メモリ・heartbeat・排他ロック・lease 保持者）を確認できる。
+- `--project` を明示した時は、そのプロジェクトの heartbeat だけを使う。Library ごと複製したプロジェクトに残った元 Editor の heartbeat（`projectPath` 不一致）は無視する。
+
+同じプロジェクトを複数セッションが使う場合は、次のどちらかを選ぶ。
+
+**順番に使う（lease）**: 一連の Editor 操作（play → 操作 → capture → stop 等）の前に占有を宣言する。lease 中は他セッションの排他コマンド（play / stop / compile_check / launch / tool_exec の入力操作など）が待機し、`--no-wait-lock` では `editor_leased` で失敗する。状態参照（status / read_console / heartbeat / ui_pointer status）は妨げない。所有者は `UNITAP_SESSION`、未設定なら Claude Code / Codex のセッション ID で識別する。
+
+```sh
+unitap --json lease acquire --ttl 1800 --note "PlayMode QA: shop"
+# ... 排他コマンドを実行するたびに期限が延長される ...
+unitap --json lease release
+unitap --json lease status
+```
+
+終了し忘れた lease は期限で自動失効する。所有セッションが既に存在しない場合だけ `lease release --force` または各コマンドの `--ignore-lease` を使う。
+
+**並行に使う（clone）**: セッションごとに作業用プロジェクトを作り、別 Editor で開く。git リポジトリでは worktree、Library は APFS clone（容量をほぼ使わず数秒）で複製するため、初回起動の再インポートをほぼ省ける。複製先は元（worktree ではリポジトリ）の兄弟 `<name>--<label>` に置き、`file:../../pkg` の相対参照を保つ。
+
+```sh
+unitap --json clone create --name qa-shop                 # HEAD の worktree（detached）
+unitap --json clone create --name fix-a --branch fix/a    # ブランチを作る
+unitap --json clone create --name wip --include-uncommitted  # 未コミット変更も複製
+unitap --json --project <clone> launch
+unitap --json clone list
+unitap --json --project <clone> quit
+unitap --json clone remove --dest <clone>                 # 未コミット変更・未参照コミットがあれば拒否
+```
+
+複製は ProjectSettings（companyName / productName）が元と同じため、Play Mode の PlayerPrefs と `Application.persistentDataPath` を元の Editor と共有する。セーブデータを書き換える Play 検証を並行させる場合は、プロジェクト側の隔離手段（検証用データ保存先など）を使う。clone の実機ビルド・アプリ ID の扱いは利用プロジェクトの規約に従う。compile_check は Play Mode を止めてから実行するが、別セッションが `play` した Play Mode は止めずに `play_mode_in_use` で失敗する（止めてよい場合だけ `--stop-foreign-play`）。
 
 ## 独自ツールにも説明を付ける
 

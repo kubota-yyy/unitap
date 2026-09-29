@@ -12,7 +12,7 @@ from .constants import (
 )
 from .editor_lock import enrich_diagnose_result_with_editor_lock
 from .editor_log import find_project_root, read_compile_errors, summarize_project_editor_activity
-from .heartbeat import find_heartbeat, check_heartbeat_fresh
+from .heartbeat import check_heartbeat_fresh, check_heartbeat_frozen, find_heartbeat
 from .image_quality import inspect_capture_image
 from .runtime_diagnostics import classify_unity_unavailability
 from .transport import (
@@ -181,6 +181,25 @@ def do_launch(args) -> None:
 
     running_same_project = list_unity_processes(project_root)
     running_any = list_unity_processes()
+    same_pids = {p.get("pid") for p in running_same_project}
+    running_other_projects = [p for p in running_any if p.get("pid") not in same_pids]
+    kill_all = bool(getattr(args, "kill_all", False))
+
+    def _already_running_payload(hb, connected: bool, message: str, **extra) -> dict:
+        payload = {
+            "ok": True,
+            "launched": False,
+            "alreadyRunning": True,
+            "connected": connected,
+            "version": version,
+            "projectPath": str(project_root),
+            "message": message,
+            "runningProcesses": _format_processes(running_same_project),
+        }
+        payload.update(extra)
+        if hb and hb.get("port"):
+            payload["port"] = hb.get("port")
+        return merge_transport_fields(payload, hb)
 
     if running_same_project and not args.restart:
         hb = find_heartbeat(args.project)
@@ -191,63 +210,59 @@ def do_launch(args) -> None:
             hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True)
             connected = bool(hb)
 
-        payload = {
-            "ok": True,
-            "launched": False,
-            "alreadyRunning": True,
-            "connected": connected,
-            "version": version,
-            "projectPath": str(project_root),
-            "message": "Unity is already running for this project. Skipped launch to prevent multi-instance startup.",
-            "runningProcesses": _format_processes(running_same_project),
-        }
-        if hb and hb.get("port"):
-            payload["port"] = hb.get("port")
-        payload = merge_transport_fields(payload, hb)
-        emit(payload)
+        emit(_already_running_payload(
+            hb,
+            connected,
+            "Unity is already running for this project. Skipped launch to prevent multi-instance startup.",
+        ))
         return
 
-    if running_any and not args.restart:
-        emit({
-            "ok": False,
-            "error": {
-                "code": "unity_already_running",
-                "message": "Another Unity instance is already running. Launch aborted to prevent multiple Unity instances.",
-            },
-            "projectPath": str(project_root),
-            "runningProcesses": _format_processes(running_any),
-        }, exit_code=1)
+    if running_same_project and args.restart and not getattr(args, "force_restart", False):
+        # --restart は「必要な時だけ」再起動する。heartbeat が新鮮な Editor は健全なので
+        # kill しない (同じプロジェクトを使っている他セッションの作業を壊さない)。
+        hb = find_heartbeat(args.project)
+        if hb and check_heartbeat_fresh(hb) and not check_heartbeat_frozen(args.project):
+            emit(_already_running_payload(
+                hb,
+                True,
+                "Unity is running and responsive. Skipped restart; use --restart --force-restart to restart anyway.",
+                restartSkipped=True,
+            ))
+            return
 
-    if args.no_kill and running_any:
+    if args.no_kill and running_same_project:
         emit({
             "ok": False,
             "error": {
                 "code": "invalid_launch_args",
-                "message": "--no-kill cannot be used while a Unity process is already running.",
+                "message": "--no-kill cannot be used while Unity is already running for this project.",
             },
             "projectPath": str(project_root),
-            "runningProcesses": _format_processes(running_any),
+            "runningProcesses": _format_processes(running_same_project),
         }, exit_code=1)
 
     # 3. バックアップ削除（Recovery Scene Backups ダイアログ防止）
     removed = clean_recovery_files(project_root)
 
     # 4. 既存プロセスを kill
-    kill_target_project = project_root if args.kill_project_only else None
-    if not args.no_kill:
-        killed = kill_unity_processes(kill_target_project)
+    # 既定では対象プロジェクトの Editor だけを終了する。別プロジェクトの Editor は
+    # 他セッションが使っている可能性があるため、--kill-all を明示した時だけ終了する。
+    killed: list[int] = []
+    if not args.no_kill and (running_same_project or (kill_all and running_other_projects)):
+        killed = kill_unity_processes(None if kill_all else project_root)
         if killed:
             print(f"Killed Unity processes: {killed}", file=sys.stderr)
             time.sleep(2)
-        if is_unity_process_running():
+        still_running = list_unity_processes(None if kill_all else project_root)
+        if still_running:
             emit({
                 "ok": False,
                 "error": {
                     "code": "unity_kill_failed",
-                    "message": "Failed to terminate existing Unity process. Launch aborted to avoid multiple Unity instances.",
+                    "message": "Failed to terminate existing Unity process. Launch aborted to avoid multiple instances of this project.",
                 },
                 "projectPath": str(project_root),
-                "runningProcesses": _format_processes(list_unity_processes()),
+                "runningProcesses": _format_processes(still_running),
             }, exit_code=1)
 
     # 5. kill 後にも再掃除（ロック解放後に残るバックアップ対策）
@@ -298,6 +313,8 @@ def do_launch(args) -> None:
             "version": version,
             "projectPath": str(project_root),
             "expectedBuildTarget": expected_build_target,
+            "killedPids": killed,
+            "otherEditorsRunning": len(running_other_projects) if not kill_all else 0,
         })
         return
 
@@ -315,6 +332,8 @@ def do_launch(args) -> None:
             "projectPath": str(project_root),
             "port": hb.get("port"),
             "expectedBuildTarget": expected_build_target,
+            "killedPids": killed,
+            "otherEditorsRunning": len(running_other_projects) if not kill_all else 0,
         }, hb))
     else:
         # プロセスが存在するかだけ確認
@@ -1032,6 +1051,7 @@ def do_compile_check(args, port: int) -> None:
             {"timeoutMs": args.timeout},
             args.timeout,
             args.project,
+            stop_foreign_play=bool(getattr(args, "stop_foreign_play", False)),
         )
         if not resp.get("ok"):
             print_unitap_response(args, resp)
@@ -1116,6 +1136,11 @@ BLOCKED_EXECUTE_MENU_PATHS = {
     "File/Build Settings...": "Build 系 window は CLI からは開かない",
     "Assets/Import New Asset...": "直接ファイルを Assets/ にコピーして refresh を呼ぶ",
     "Assets/Export Package...": "ExportPackage API を tool_exec 経由で呼ぶ",
+    # Editor 終了はこのプロジェクトの Editor だけを終了する quit コマンドを使う
+    "File/Quit": "unitap quit を使う (このプロジェクトの Editor だけを終了する)",
+    "File/Exit": "unitap quit を使う (このプロジェクトの Editor だけを終了する)",
+    "Unity/Quit": "unitap quit を使う (このプロジェクトの Editor だけを終了する)",
+    "Unity/Quit Unity": "unitap quit を使う (このプロジェクトの Editor だけを終了する)",
 }
 
 
@@ -1124,6 +1149,19 @@ TOOL_EXEC_TOP_LEVEL_ALIASES = {
     "list_tools": "tool_list",
     "execute_menu": "execute_menu --menuPath <path>",
     "manage_editor": "play / stop / launch のいずれか",
+    # 実行履歴で tool_not_found になっていた CLI コマンド名の誤用
+    "compile_check": "compile_check",
+    "get_editor_state": "status",
+    "editor_state": "status",
+    "status": "status",
+    "set_play_mode": "play / stop",
+    "play": "play",
+    "stop": "stop",
+    "refresh": "refresh",
+    "read_console": "read_console",
+    "capture": "capture",
+    "launch": "launch",
+    "quit": "quit",
 }
 
 LONG_RUNNING_TOOL_TIMEOUTS_MS = {
@@ -1131,19 +1169,32 @@ LONG_RUNNING_TOOL_TIMEOUTS_MS = {
 }
 
 
-def _check_execute_menu_blocklist(menu_path: str) -> None:
+def _check_execute_menu_blocklist(args, menu_path: str) -> None:
     if not menu_path:
         return
     normalized = menu_path.strip()
     # exact match + endswith "..." variants
     for blocked, alt in BLOCKED_EXECUTE_MENU_PATHS.items():
         if normalized == blocked or normalized == blocked + "...":
-            print(
-                f"Error: execute_menu は '{menu_path}' を拒否しました。"
-                f"ネイティブファイルダイアログが開いて Unity が固まります。"
-                f"代わりに: {alt}",
-                file=sys.stderr,
+            quits = "quit" in alt
+            reason = (
+                "Editor 終了メニューは全 Editor/他セッションに影響するため使いません。"
+                if quits
+                else "ネイティブファイルダイアログが開いて Unity が固まります。"
             )
+            payload = {
+                "ok": False,
+                "error": {
+                    "code": "execute_menu_blocked",
+                    "message": f"execute_menu は '{menu_path}' を拒否しました。{reason}代わりに: {alt}",
+                    "details": {"menuPath": menu_path, "alternative": alt, "hint": alt},
+                },
+            }
+            setattr(args, "_last_unitap_response", payload)
+            if getattr(args, "json", False):
+                print(json.dumps(payload, indent=2, ensure_ascii=False))
+            else:
+                print(f"Error: {payload['error']['message']}", file=sys.stderr)
             sys.exit(2)
 
 
@@ -1312,8 +1363,8 @@ def _tool_exec_alias_error(tool_name: str, tool_params: dict) -> dict | None:
         if isinstance(menu_path, str) and menu_path.strip():
             alternative = f"execute_menu --menuPath {json.dumps(menu_path, ensure_ascii=False)}"
 
-    if tool_name == "manage_editor":
-        action = tool_params.get("action")
+    if tool_name in ("manage_editor", "set_play_mode"):
+        action = tool_params.get("action") or tool_params.get("mode")
         if action in ("play", "stop"):
             alternative = str(action)
         elif action == "launch":
@@ -1339,7 +1390,7 @@ def do_sync_command(args, port: int) -> None:
     timeout_ms = DEFAULT_TIMEOUT_MS
 
     if args.command == "execute_menu":
-        _check_execute_menu_blocklist(args.menuPath)
+        _check_execute_menu_blocklist(args, args.menuPath)
         params = {"menuPath": args.menuPath}
         timeout_ms = int(getattr(args, "timeout_ms", timeout_ms) or timeout_ms)
         retryable = False

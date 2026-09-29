@@ -1,6 +1,7 @@
 import os
 import platform
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -231,28 +232,42 @@ def _normalize_path_for_compare(path: str | Path | None) -> str | None:
     return normalized
 
 
+_PROJECT_FLAGS = ("-projectPath", "--projectPath", "-projectpath", "--projectpath")
+
+
 def _extract_project_path_from_command(command: str) -> str | None:
+    # ps は引数を quote しないため、空白を含むパスでは shlex が分割してしまう。
+    # まず shlex で読み、実在しなければ「次の -flag まで」を 1 つのパスとして読む。
+    shlex_value = None
     try:
         args = shlex.split(command)
     except ValueError:
-        return None
-
-    project_flags = ("-projectPath", "--projectPath", "-projectpath", "--projectpath")
+        args = []
 
     for idx, token in enumerate(args):
-        if token in project_flags:
+        if token in _PROJECT_FLAGS:
             if idx + 1 < len(args):
-                return args[idx + 1]
+                shlex_value = args[idx + 1]
+                break
             continue
-
-        for flag in project_flags:
+        for flag in _PROJECT_FLAGS:
             prefix = f"{flag}="
-            if token.startswith(prefix):
-                value = token[len(prefix):]
-                if value:
-                    return value
+            if token.startswith(prefix) and token[len(prefix):]:
+                shlex_value = token[len(prefix):]
+                break
+        if shlex_value:
+            break
 
-    return None
+    if shlex_value and Path(shlex_value).exists():
+        return shlex_value
+
+    match = re.search(r"(?:^|\s)--?projectpath[= ](?P<path>.+?)(?=\s+-[A-Za-z]|$)", command, re.IGNORECASE)
+    if match:
+        spaced_value = match.group("path").strip().strip("\"'")
+        if spaced_value and Path(spaced_value).exists():
+            return spaced_value
+
+    return shlex_value
 
 
 def _is_unity_editor_command(command: str) -> bool:
@@ -285,21 +300,10 @@ def _is_same_project_path(a: str | None, b: str | None) -> bool:
 
 
 def _command_matches_project(command: str, project_root: Path) -> bool:
-    project_root_raw = str(project_root)
-    project_root_norm = _normalize_path_for_match(project_root_raw)
-
-    # 先に文字列一致で高速に判定し、必要時のみ projectPath 引数を解釈する。
-    if project_root_raw in command:
-        return True
-    if project_root_norm and project_root_norm in command:
-        return True
-
+    # 部分文字列一致は使わない。/x/game と /x/game--clone のような兄弟プロジェクトを
+    # 同一視すると、別 Editor を kill / focus してしまうため。
     command_project = _extract_project_path_from_command(command)
-    if _is_same_project_path(command_project, project_root_raw):
-        return True
-    if _is_same_project_path(command_project, project_root_norm):
-        return True
-    return False
+    return _is_same_project_path(command_project, project_root)
 
 
 def _list_unity_processes(project_root: Path | None = None) -> list[tuple[int, str]]:
@@ -553,7 +557,14 @@ def focus_unity_editor(
         scripts.append(
             f'tell application "System Events" to set frontmost of (first process whose unix id is {target_pid}) to true'
         )
-    scripts.append('tell application "Unity" to activate')
+    elif project_root is not None:
+        # 対象プロジェクトの Editor が見つからない時に `tell application "Unity"` へ
+        # フォールバックすると、別プロジェクトの Editor を前面化してしまう。
+        if log_failures:
+            print("[unitap] Unity focus failed: Unity process not found for this project", file=sys.stderr)
+        return False
+    elif len(_list_unity_processes()) == 1:
+        scripts.append('tell application "Unity" to activate')
 
     failure_reasons: list[str] = []
     for script in scripts:
@@ -596,3 +607,17 @@ def focus_unity_editor(
         message = "; ".join(failure_reasons[-5:]) if failure_reasons else "unknown reason"
         print(f"[unitap] Unity focus failed: {message}", file=sys.stderr)
     return False
+
+
+def get_process_rss_mb(pid: int) -> float | None:
+    try:
+        result = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    value = (result.stdout or "").strip()
+    if not value:
+        return None
+    try:
+        return round(int(value) / 1024.0, 1)
+    except ValueError:
+        return None

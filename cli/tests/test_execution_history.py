@@ -27,6 +27,7 @@ class ExecutionHistoryTests(unittest.TestCase):
                 "forceRestart": False,
                 "noKill": False,
                 "killProjectOnly": True,
+                "killAll": False,
                 "noWait": False,
                 "waitTimeout": 300,
                 "ignoreCompilerErrors": False,

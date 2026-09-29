@@ -66,7 +66,7 @@ namespace Unitap.Commands
             return new UnitapCommandException("tool_not_found", msg, details);
         }
 
-        static List<string> SuggestToolNames(string query, List<string> candidates, int max)
+        internal static List<string> SuggestToolNames(string query, List<string> candidates, int max)
         {
             if (string.IsNullOrEmpty(query) || candidates == null || candidates.Count == 0)
                 return new List<string>();

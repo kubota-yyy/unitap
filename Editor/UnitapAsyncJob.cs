@@ -401,8 +401,7 @@ namespace Unitap
                     resultSummary
                 };
 
-                File.AppendAllText(JobHistoryFilePath,
-                    JsonConvert.SerializeObject(payload) + "\n");
+                UnitapJsonl.Append(JobHistoryFilePath, JsonConvert.SerializeObject(payload));
             }
             catch (Exception ex)
             {

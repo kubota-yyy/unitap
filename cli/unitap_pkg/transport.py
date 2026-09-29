@@ -399,7 +399,24 @@ def extract_wait_idle_state(result: dict, project_path: str | None) -> tuple[boo
     return False, False
 
 
-def poll_async_job(host: str, port: int, command: str, params: dict, timeout_ms: int, project_path: str | None) -> dict:
+def _foreign_play_owner(project_path: str | None) -> dict | None:
+    if not project_path:
+        return None
+    from .lease import foreign_play_owner, resolve_session_owner
+
+    return foreign_play_owner(Path(project_path), resolve_session_owner())
+
+
+def poll_async_job(
+    host: str,
+    port: int,
+    command: str,
+    params: dict,
+    timeout_ms: int,
+    project_path: str | None,
+    *,
+    stop_foreign_play: bool = False,
+) -> dict:
     """非同期ジョブを開始→ポーリング→完了結果を返す"""
     current_port = port
     started_at = time.time()
@@ -439,6 +456,20 @@ def poll_async_job(host: str, port: int, command: str, params: dict, timeout_ms:
 
     # PlayMode中の場合（compile_check）— precondition_failed エラーまたは result.isPlaying
     if result.get("isPlaying") or error.get("code") == "precondition_failed":
+        play_owner = None if stop_foreign_play else _foreign_play_owner(project_path)
+        if play_owner:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "play_mode_in_use",
+                    "message": (
+                        f"Play Mode was started by another session ({play_owner.get('owner')}). "
+                        f"{command} will not stop it. Wait for that session, work in a clone "
+                        "(`unitap clone create`), or pass --stop-foreign-play."
+                    ),
+                    "details": {"playOwner": play_owner},
+                },
+            }
         print("Play mode detected, stopping and retrying...", file=sys.stderr)
         try:
             stop_req = build_request("stop", {}, 10000, False)

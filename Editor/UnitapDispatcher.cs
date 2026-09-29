@@ -217,7 +217,7 @@ namespace Unitap
                     command,
                     timestamp = DateTime.UtcNow.ToString("O")
                 });
-                File.AppendAllText(_journalPath, entry + "\n");
+                UnitapJsonl.Append(_journalPath, entry);
             }
             catch { /* ジャーナル書き込み失敗は無視 */ }
         }

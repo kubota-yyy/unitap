@@ -92,6 +92,8 @@ Global options must appear before the subcommand:
 python3 cli/unitap.py --wait-lock --lock-timeout 900 compile_check --timeout 60000
 ```
 
+Several Unity Editors (different projects, or per-session clones of one project) can run at once; Unitap only launches, quits and focuses the Editor of `--project`. A session can reserve a project's Editor across several commands with `lease acquire`; other sessions' exclusive commands then wait (or fail with `editor_leased` under `--no-wait-lock`). See [docs/agent-guide.md](docs/agent-guide.md).
+
 Exclusive commands keep a project-scoped lock under `Library/Unitap/.editor-op.lock`. If another long-running or destructive operation is already using Unitap, the default behavior is to wait for the lock. Add `--no-wait-lock` to fail fast with `Error [editor_busy]`, or set `--lock-timeout` to bound the wait.
 
 ```bash
@@ -116,9 +118,17 @@ python3 cli/unitap.py clear_console
 # Capture GameView
 python3 cli/unitap.py capture --output /tmp/test.png --superSize 2
 
-# Launch Unity
+# Launch Unity (other projects' Editors keep running)
 python3 cli/unitap.py launch
-python3 cli/unitap.py launch --restart
+python3 cli/unitap.py launch --restart                  # only when this project's Editor is unresponsive
+python3 cli/unitap.py launch --restart --force-restart  # restart even when healthy
+python3 cli/unitap.py quit                              # quit only this project's Editor
+
+# Several Editors / sessions on one machine
+python3 cli/unitap.py editors                           # every running Editor with lock/lease holders
+python3 cli/unitap.py lease acquire --note "QA"         # reserve this project's Editor for the session
+python3 cli/unitap.py lease release
+python3 cli/unitap.py clone create --name s2            # git worktree + APFS-cloned Library for a parallel Editor
 
 # Custom tools
 python3 cli/unitap.py tool_list

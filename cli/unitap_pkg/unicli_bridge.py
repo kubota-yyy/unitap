@@ -40,7 +40,10 @@ def run_unicli(project, operation, forwarded=(), timeout_ms=90000):
         return fail("project_not_found", "Specify the Unity project with unitap --project.")
     binary = shutil.which(os.environ.get("UNITAP_UNICLI_BIN", "unicli"))
     if not binary:
-        return fail("unicli_not_found", "Install UniCLI or set UNITAP_UNICLI_BIN to its executable.")
+        return fail("unicli_not_found", "Install UniCLI or set UNITAP_UNICLI_BIN to its executable.", {
+            "hint": "UniCLI is not installed on this machine. Use a registered custom tool (`unitap commands --live --backend tool`) "
+                    "or execute_menu instead; unitap does not evaluate arbitrary C#.",
+        })
     forwarded = list(forwarded)
     if operation in ("exec", "eval") and not forwarded:
         return fail("missing_argument", "exec requires a command; eval requires C# code.")

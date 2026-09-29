@@ -32,6 +32,16 @@ from .unity import dismiss_startup_dialogs_async, focus_unity_editor, is_unity_p
 from .execution_history import record_execution_history
 from .unicli_bridge import register as register_unicli
 from .discovery import register as register_discovery
+from .session_commands import register as register_session_commands
+from .clone import register as register_clone
+from .lease import (
+    EditorLeasedError,
+    clear_play_owner,
+    record_play_owner,
+    resolve_session_owner,
+    touch_lease_if_owned,
+    wait_for_foreign_lease,
+)
 from .commands import (
     do_capture,
     do_capture_editor,
@@ -192,6 +202,51 @@ def _should_skip_polling_history(args) -> bool:
     return getattr(args, "command", None) in {"status", "heartbeat"}
 
 
+# project 未指定でも動く (実行中 Editor からの推測もしない) コマンド
+_PROJECT_OPTIONAL_COMMANDS = ("commands", "describe", "editors")
+# Unity のダイアログ監視 (osascript) を起動しないコマンド
+_NO_DIALOG_WATCH_COMMANDS = (
+    "focus", "unicli", "exec", "eval", "commands", "describe", "editors", "lease", "clone", "quit",
+)
+
+
+def _enforce_session_lease(args, project_root: Path, started_at: float) -> None:
+    """他セッションが lease を持つ間は排他コマンドを待たせる (または editor_leased で失敗)。"""
+    if getattr(args, "ignore_lease", False):
+        return
+    owner = resolve_session_owner()
+    try:
+        waited = wait_for_foreign_lease(
+            project_root,
+            owner,
+            wait=bool(args.wait_lock),
+            timeout_s=float(args.lock_timeout),
+        )
+    except EditorLeasedError as ex:
+        _print_cli_error(args, ex.code, ex.message, ex.details)
+        setattr(args, "_command_exit_code", 1)
+        _record_command_history(args, started_at)
+        sys.exit(1)
+    if waited >= 1.0:
+        print(f"[unitap] waited {waited:.0f}s for another session's Editor lease", file=sys.stderr)
+    setattr(args, "_lease_wait_ms", int(waited * 1000))
+    touch_lease_if_owned(project_root, owner)
+
+
+def _update_play_owner(args, project_root: Path | None) -> None:
+    if project_root is None:
+        return
+    command = getattr(args, "command", None)
+    if command == "play":
+        record_play_owner(project_root, resolve_session_owner())
+    elif command in ("stop", "quit"):
+        clear_play_owner(project_root)
+    elif command == "launch":
+        response = getattr(args, "_last_unitap_response", None)
+        if isinstance(response, dict) and response.get("launched"):
+            clear_play_owner(project_root)
+
+
 def build_parser():
     """Build the same parser for execution, help and agent discovery."""
     parser = argparse.ArgumentParser(description="Unitap - Unity Editor control CLI")
@@ -208,6 +263,11 @@ def build_parser():
         type=float,
         default=1800.0,
         help="Maximum seconds to wait when --wait-lock is specified",
+    )
+    parser.add_argument(
+        "--ignore-lease",
+        action="store_true",
+        help="Run exclusive commands even while another session holds this project's Editor lease",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -348,6 +408,11 @@ def build_parser():
     p_compile.add_argument("--timeout", type=int, default=90000, help="Timeout in ms")
     p_compile.add_argument("--max-retries", type=int, default=3, dest="max_retries",
                            help="Max retries when timed out while still compiling (default: 3)")
+    p_compile.add_argument(
+        "--stop-foreign-play",
+        action="store_true",
+        help="Stop Play Mode even when another session started it (default: fail with play_mode_in_use)",
+    )
     p_compile.set_defaults(focus_unity=True, auto_focus_on_stall=True)
     p_compile.add_argument(
         "--focus-unity",
@@ -419,10 +484,23 @@ def build_parser():
     subparsers.add_parser("heartbeat", help="Show heartbeat info")
 
     p_launch = subparsers.add_parser("launch", help="Launch Unity Editor")
-    p_launch.add_argument("--no-kill", action="store_true", help="Don't kill existing Unity processes")
-    p_launch.add_argument("--kill-project-only", action="store_true", help="Only kill Unity for this project")
-    p_launch.add_argument("--restart", action="store_true", help="Restart Unity when needed")
-    p_launch.add_argument("--force-restart", action="store_true", help="Always restart Unity even when it is already healthy")
+    p_launch.add_argument("--no-kill", action="store_true", help="Don't kill this project's existing Unity process")
+    p_launch.add_argument(
+        "--kill-project-only",
+        action="store_true",
+        help="(deprecated) Default behavior now: only this project's Unity is terminated",
+    )
+    p_launch.add_argument(
+        "--kill-all",
+        action="store_true",
+        help="Also terminate Unity Editors of OTHER projects (may break other sessions; opt-in only)",
+    )
+    p_launch.add_argument(
+        "--restart",
+        action="store_true",
+        help="Restart Unity only when it is unresponsive (stale/frozen heartbeat)",
+    )
+    p_launch.add_argument("--force-restart", action="store_true", help="With --restart: restart even when Unity is healthy")
     p_launch.add_argument(
         "--ignore-compiler-errors",
         action="store_true",
@@ -450,6 +528,8 @@ def build_parser():
     }
 
     register_unicli(subparsers, dispatch_table)
+    register_session_commands(subparsers, dispatch_table)
+    register_clone(subparsers, dispatch_table)
 
     # --- Extension registration ---
     if _ext_module and hasattr(_ext_module, "register"):
@@ -545,7 +625,10 @@ def main():
         sys.exit(1)
 
     try:
-        resolved_project = resolve_project_root(args.project, allow_process_discovery=args.command not in ("commands", "describe"))
+        resolved_project = resolve_project_root(
+            args.project,
+            allow_process_discovery=args.command not in _PROJECT_OPTIONAL_COMMANDS,
+        )
     except ProjectResolutionError as ex:
         _print_cli_error(args, ex.code, ex.message, ex.details)
         sys.exit(1)
@@ -556,7 +639,7 @@ def main():
     # Unity may show native modal dialogs while compiling, refreshing, or
     # reloading scenes. Keep the known-dialog dismisser alive around editor
     # commands, not only immediately after launching Unity.
-    if args.command not in ("focus", "unicli", "exec", "eval", "commands", "describe"):
+    if args.command not in _NO_DIALOG_WATCH_COMMANDS:
         dismiss_startup_dialogs_async(timeout_seconds=_known_dialog_dismiss_timeout_seconds(args))
 
     lock_context = contextlib.nullcontext()
@@ -570,12 +653,14 @@ def main():
             )
             sys.exit(1)
         metadata = build_editor_lock_metadata(args, resolved_project)
+        setattr(args, "_lock_metadata", metadata)
         lock_context = editor_operation_lock(
             resolved_project,
             metadata,
             wait=bool(args.wait_lock),
             timeout_s=float(args.lock_timeout),
         )
+        _enforce_session_lease(args, resolved_project, command_started_at)
 
     # Commands that don't need heartbeat
     if args.command == "launch":
@@ -607,6 +692,7 @@ def main():
 
         if resolved_project is not None:
             launch_metadata = build_editor_lock_metadata(args, resolved_project)
+            setattr(args, "_lock_metadata", launch_metadata)
             launch_lock_context = editor_operation_lock(
                 resolved_project,
                 launch_metadata,
@@ -620,6 +706,7 @@ def main():
             with launch_lock_context:
                 dispatch_table["launch"](args, None)
             setattr(args, "_command_exit_code", 0)
+            _update_play_owner(args, resolved_project)
         except EditorOperationBusyError as ex:
             details = ex.details if isinstance(ex.details, dict) else {}
             busy_holder = details.get("holder") if isinstance(details, dict) else None
@@ -650,6 +737,7 @@ def main():
             with lock_context:
                 handler(args, None)
             setattr(args, "_command_exit_code", 0)
+            _update_play_owner(args, resolved_project)
         except EditorOperationBusyError as ex:
             _print_cli_error(args, ex.code, ex.message, ex.details)
             setattr(args, "_command_exit_code", 1)
@@ -828,6 +916,7 @@ def main():
             with lock_context:
                 handler(args, port)
             setattr(args, "_command_exit_code", 0)
+            _update_play_owner(args, resolved_project)
         except EditorOperationBusyError as ex:
             _print_cli_error(args, ex.code, ex.message, ex.details)
             setattr(args, "_command_exit_code", 1)
@@ -847,6 +936,7 @@ def main():
         with lock_context:
             sync_handler(args, port)
         setattr(args, "_command_exit_code", 0)
+        _update_play_owner(args, resolved_project)
     except EditorOperationBusyError as ex:
         _print_cli_error(args, ex.code, ex.message, ex.details)
         setattr(args, "_command_exit_code", 1)

@@ -20,6 +20,7 @@ LOCKED_COMMANDS = {
     "execute_menu",
     "launch",
     "play",
+    "quit",
     "redo",
     "refresh",
     "reimport",
@@ -47,6 +48,7 @@ LOCKED_TOOL_NAMES = {
     "capture_interior_all_asset_versions",
     "capture_interior_all_sbmaster",
     "capture_sceneview",
+    "invoke_inspector_action",
     "open_scene",
     "run_automate_test",
     "run_playmode_test",
@@ -88,7 +90,22 @@ def command_requires_editor_lock(args) -> bool:
     tool_name = str(getattr(args, "tool", "") or "")
     if tool_name in UNLOCKED_TOOL_NAMES:
         return False
+    if tool_name == "ui_pointer":
+        # 入力操作は他セッションの play/stop/compile と交互に走ると結果が壊れる。
+        # 状態参照 (status/inspect) は高頻度ポーリングされるので lock しない。
+        return _tool_action(args) not in ("status", "inspect")
     return tool_name in LOCKED_TOOL_NAMES
+
+
+def _tool_action(args) -> str | None:
+    try:
+        params = json.loads(getattr(args, "params", "{}") or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(params, dict):
+        return None
+    action = params.get("action")
+    return action if isinstance(action, str) else None
 
 
 def build_editor_lock_metadata(args, project_root: Path) -> dict:
@@ -98,11 +115,18 @@ def build_editor_lock_metadata(args, project_root: Path) -> dict:
         "tool": None,
         "startedAt": datetime.now(timezone.utc).isoformat(),
         "projectPath": str(project_root),
+        "session": _session_owner(),
     }
     if metadata["command"] == "tool_exec":
         tool_name = str(getattr(args, "tool", "") or "")
         metadata["tool"] = tool_name or None
     return metadata
+
+
+def _session_owner() -> str | None:
+    from .lease import resolve_session_owner
+
+    return resolve_session_owner()
 
 
 def _editor_operation_dir(project_root: Path) -> Path:
@@ -337,8 +361,9 @@ def _build_busy_details(
 def editor_operation_lock(project_root: Path, metadata: dict, *, wait: bool, timeout_s: float):
     lock_path = _editor_operation_lock_path(project_root)
     with _EditorOperationFileLock(lock_path) as lock_file:
+        wait_started = time.monotonic()
         acquired = lock_file.try_acquire()
-        deadline = time.monotonic() + max(timeout_s, 0.0)
+        deadline = wait_started + max(timeout_s, 0.0)
 
         while not acquired and wait and time.monotonic() < deadline:
             time.sleep(EDITOR_OPERATION_POLL_SECONDS)
@@ -354,6 +379,7 @@ def editor_operation_lock(project_root: Path, metadata: dict, *, wait: bool, tim
                 _build_busy_details(project_root, metadata, waited=wait, timeout_s=timeout_s if wait else None),
             )
 
+        metadata["lockWaitMs"] = int((time.monotonic() - wait_started) * 1000)
         _write_editor_operation_metadata(project_root, metadata)
         try:
             yield
