@@ -151,12 +151,13 @@ def _populate_worktree(repo_root: Path, dest_repo: Path, include_uncommitted: bo
         else:
             copied += 1
     # index を HEAD に合わせる (作業ツリーは触らない)
-    result = _run(["git", "-C", str(dest_repo), "reset", "-q", "--mixed", "HEAD"])
+    # submodule.recurse=true の環境でも、未作成の submodule へ再帰させない (後で個別に用意する)
+    result = _run(["git", "-c", "submodule.recurse=false", "-C", str(dest_repo), "reset", "-q", "--mixed", "HEAD"])
     if result.returncode != 0:
         raise RuntimeError(f"git reset failed in clone: {result.stderr.strip()}")
     if not include_uncommitted:
         # 元の未コミット変更・削除を HEAD の内容へ戻す (差分のあるファイルだけ書き換わる)
-        result = _run(["git", "-C", str(dest_repo), "checkout", "-q", "--", "."])
+        result = _run(["git", "-c", "submodule.recurse=false", "-C", str(dest_repo), "checkout", "-q", "--", "."])
         if result.returncode != 0:
             raise RuntimeError(f"git checkout failed in clone: {result.stderr.strip()}")
     return {"cloned": cloned, "copied": copied}
@@ -326,7 +327,7 @@ def create_clone(
         dest_project = dest_repo / rel
         if dest_repo.exists():
             raise FileExistsError(f"Destination already exists: {dest_repo}")
-        cmd = ["git", "-C", str(repo_root), "worktree", "add", "--no-checkout"]
+        cmd = ["git", "-c", "submodule.recurse=false", "-C", str(repo_root), "worktree", "add", "--no-checkout"]
         cmd += ["-b", branch] if branch else ["--detach"]
         cmd += [str(dest_repo), "HEAD"]
         result = _run(cmd)

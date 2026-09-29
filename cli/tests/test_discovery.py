@@ -125,7 +125,10 @@ class DiscoveryTests(unittest.TestCase):
                 env=dict(os.environ, UNITAP_UNICLI_BIN='/does/not/exist'), capture_output=True, text=True, timeout=10)
             self.assertEqual([], list(Path(temp).iterdir()))
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIsNone(json.loads(result.stdout)['result']['projectPath'])
+        # unitap が Unity プロジェクト直下の submodule なら、そのプロジェクトを推定するのが正しい
+        containing = Path(__file__).resolve().parents[3]
+        expected = str(containing) if (containing / 'Assets').exists() and (containing / 'ProjectSettings').exists() else None
+        self.assertEqual(expected, json.loads(result.stdout)['result']['projectPath'])
 
     def test_discovery_does_not_wait_for_project_lock(self):
         entrypoint = Path(__file__).resolve().parents[1] / 'unitap.py'

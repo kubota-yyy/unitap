@@ -55,6 +55,7 @@ class SubmoduleCloneTests(unittest.TestCase):
         _git(repo, "submodule", "add", "-q", str(pkg), "unitap")
         _git(repo, "add", ".")
         _git(repo, "commit", "-qm", "init")
+        _git(repo, "config", "submodule.recurse", "true")  # 利用側で推奨している設定でも動くこと
         return repo, project
 
     def test_clone_checks_out_submodule_package_and_protects_its_work(self):
