@@ -149,6 +149,17 @@ class LaunchCoexistenceTests(unittest.TestCase):
         self.assertEqual([], killed)
         popen.assert_not_called()
 
+    def test_restart_replaces_editor_running_another_unity_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = _make_project(Path(tmp).resolve() / "game")
+            procs = {str(game): [{"pid": 22, "projectPath": str(game), "command": "Unity"}]}
+            payload, killed, popen, _ = self._run_launch(
+                _launch_args(game, restart=True), procs, hb={"transportKind": "file", "unityVersion": "6000.0.1f1"}
+            )
+        self.assertEqual([game], killed)
+        self.assertTrue(payload["launched"])
+        popen.assert_called_once()
+
     def test_restart_kills_only_this_project_when_unresponsive(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp).resolve()

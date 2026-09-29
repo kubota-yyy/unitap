@@ -221,7 +221,10 @@ def do_launch(args) -> None:
         # --restart は「必要な時だけ」再起動する。heartbeat が新鮮な Editor は健全なので
         # kill しない (同じプロジェクトを使っている他セッションの作業を壊さない)。
         hb = find_heartbeat(args.project)
-        if hb and check_heartbeat_fresh(hb) and not check_heartbeat_frozen(args.project):
+        running_version = (hb or {}).get("unityVersion")
+        # ProjectVersion.txt と違う Unity で開いたままなら (Unity 更新直後など) 再起動が必要
+        version_mismatch = bool(running_version) and running_version != version
+        if hb and check_heartbeat_fresh(hb) and not version_mismatch and not check_heartbeat_frozen(args.project):
             emit(_already_running_payload(
                 hb,
                 True,

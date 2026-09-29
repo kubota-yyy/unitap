@@ -72,7 +72,7 @@ UniCLI コマンドの引数調査には `describe unicli:NAME` を使う。`exe
 1 台の Mac で複数プロジェクトの Editor を同時に動かしてよい。Unitap は対象を `--project` の Editor だけに限定する。
 
 - `launch` は他プロジェクトの Editor を終了しない。終了するのは同じプロジェクトの Editor だけ。別プロジェクトも止めたい場合だけ `--kill-all` を明示する（他セッションの作業を壊すため通常は使わない）。
-- `launch --restart` は heartbeat が止まった・凍結した Editor だけを再起動する。応答している Editor は `restartSkipped: true` を返して残す。健全でも再起動が必要な場合は `--restart --force-restart`。
+- `launch --restart` は heartbeat が止まった・凍結した Editor、または ProjectVersion.txt と違う Unity で開いている Editor だけを再起動する。コンパイルが進まない等、応答はあるが壊れている Editor の復旧には `--restart --force-restart` を使う。応答している Editor は `restartSkipped: true` を返して残す。
 - Editor の終了は `quit`（このプロジェクトの Editor だけ）。`execute_menu File/Quit` は拒否される。
 - `focus` / `compile_check` の前面化は対象プロジェクトの PID だけを扱い、見つからなければ別の Unity を前面化せず失敗する。
 - `editors` でマシン上の全 Editor（プロジェクト・PID・メモリ・heartbeat・排他ロック・lease 保持者）を確認できる。

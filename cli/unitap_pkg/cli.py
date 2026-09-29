@@ -501,7 +501,7 @@ def build_parser():
     p_launch.add_argument(
         "--restart",
         action="store_true",
-        help="Restart Unity only when it is unresponsive (stale/frozen heartbeat)",
+        help="Restart Unity only when needed (stale/frozen heartbeat or a different Unity version than ProjectVersion.txt)",
     )
     p_launch.add_argument("--force-restart", action="store_true", help="With --restart: restart even when Unity is healthy")
     p_launch.add_argument(
