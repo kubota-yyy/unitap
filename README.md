@@ -146,6 +146,8 @@ python3 cli/unitap.py tool_list
 python3 cli/unitap.py tool_exec --tool find_assets --params '{"query": "Panel", "type": "Prefab"}'
 ```
 
+On macOS, Unitap's startup dialog watcher automatically selects **Ignore** in the **Enter Safe Mode?** dialog. It recognizes the dialog by its buttons or prompt text even when the window title is blank or generic. This requires macOS Accessibility permission and applies while Unitap's watcher is running; it does not change Unity Hub's launch preferences. Unity's **Show Enter Safe Mode Dialog** preference cannot provide an always-Ignore default: disabling it automatically enters Safe Mode instead.
+
 For long-running test flows, prefer wrapper commands such as `run_automate_test --wait`, `run_automate_batch`, and `run_playmode_test --wait` instead of raw `tool_exec --tool run_automate_test` / `run_playmode_test`.
 
 - `run_automate_test --wait` / `run_automate_batch` keep the CLI lock for the wait lifecycle.

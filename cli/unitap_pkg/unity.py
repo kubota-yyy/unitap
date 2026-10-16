@@ -57,7 +57,16 @@ def build_unity_launch_environment() -> dict[str, str]:
 # pgrep -f で既存ウォッチャーを見つけるための識別子。スクリプト先頭に埋め込む。
 _STARTUP_DIALOG_DISMISS_MARKER = "unitap:startup-dialog-dismiss"
 
-_STARTUP_DIALOG_DISMISS_SCRIPT = f"-- {_STARTUP_DIALOG_DISMISS_MARKER}\n" + r'''
+_SAFE_MODE_DIALOG_MATCHER = r'''
+on isSafeModeDialog(dialogText, buttonNames)
+    if buttonNames does not contain "Ignore" then return false
+    if buttonNames contains "Enter Safe Mode" then return true
+    return dialogText contains "Enter Safe Mode?"
+end isSafeModeDialog
+'''
+
+_STARTUP_DIALOG_DISMISS_SCRIPT = (
+    f"-- {_STARTUP_DIALOG_DISMISS_MARKER}\n" + _SAFE_MODE_DIALOG_MATCHER + r'''
 on run argv
     set timeoutSeconds to 90
     if (count of argv) is greater than 0 then
@@ -88,7 +97,7 @@ on run argv
                                         set dialogText to dialogText & " " & (textValue as text)
                                     end repeat
                                 end try
-                                if wName contains "Safe Mode" then
+                                if my isSafeModeDialog(dialogText, buttonNames) then
                                     try
                                         click button "Ignore" of w
                                     end try
@@ -121,7 +130,7 @@ on run argv
         delay 0.5
     end repeat
 end run
-'''
+''')
 
 
 def _startup_dialog_dismisser_running() -> bool:
