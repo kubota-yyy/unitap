@@ -112,6 +112,7 @@ def do_lease(args, _port=None) -> None:
                 timeout_s=float(getattr(args, "lock_timeout", 0.0) or 0.0),
             )}
     except EditorLeasedError as ex:
+        setattr(args, "_lease_wait_ms", round(float(ex.details.get("waitedSeconds", 0)) * 1000))
         print_unitap_response(args, {"ok": False, "error": {"code": ex.code, "message": ex.message, "details": ex.details}})
         return
     print_unitap_response(args, {"ok": True, "result": result})

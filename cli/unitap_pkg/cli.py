@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import json
+import math
 import os
 import sys
 import time
@@ -30,7 +31,7 @@ from .runtime_diagnostics import classify_unity_unavailability
 from .transport import wait_for_connection
 from .unity import dismiss_startup_dialogs_async, focus_unity_editor, is_unity_process_running
 from .execution_history import record_execution_history
-from .unicli_bridge import register as register_unicli
+from .unicli_bridge import prepare_unicli, register as register_unicli
 from .discovery import register as register_discovery
 from .session_commands import register as register_session_commands
 from .clone import register as register_clone
@@ -226,6 +227,7 @@ def _enforce_session_lease(args, project_root: Path, started_at: float) -> None:
             timeout_s=float(args.lock_timeout),
         )
     except EditorLeasedError as ex:
+        setattr(args, "_lease_wait_ms", round(float(ex.details.get("waitedSeconds", 0)) * 1000))
         _print_cli_error(args, ex.code, ex.message, ex.details)
         setattr(args, "_command_exit_code", 1)
         _record_command_history(args, started_at)
@@ -264,8 +266,8 @@ def build_parser():
     parser.add_argument(
         "--lock-timeout",
         type=float,
-        default=1800.0,
-        help="Maximum seconds to wait when --wait-lock is specified",
+        default=30.0,
+        help="Maximum seconds to wait for each lock/lease (default: 30; increase explicitly for a planned wait)",
     )
     parser.add_argument(
         "--ignore-lease",
@@ -357,6 +359,8 @@ def build_parser():
     p_wait_result.add_argument("--done", required=True, help="File the script writes when it finished")
     p_wait_result.add_argument("--fail", default=None, help="File the script writes on failure (its text is returned)")
     p_wait_result.add_argument("--progress", default=None, help="File the script appends to while it runs")
+    p_wait_result.add_argument("--after", type=float, default=None, help="Only accept markers modified at/after this Unix timestamp; record it before starting QA")
+    p_wait_result.add_argument("--start-timeout", type=float, default=0, help="Fail if no fresh progress appears within this many seconds (requires --after and --progress)")
     p_wait_result.add_argument("--stall", type=float, default=0, help="Fail when --progress is not updated for this many seconds")
     p_wait_result.add_argument("--require-playing", action="store_true", help="Fail as soon as Play Mode is not running")
     p_wait_result.add_argument("--ignore-errors", action="store_true", help="Do not stop on new console errors/exceptions")
@@ -623,7 +627,20 @@ def main():
         if args.stall_focus_interval_ms < 0:
             _print_cli_error(args, "invalid_stall_focus_interval", "--stall-focus-interval-ms must be >= 0")
             sys.exit(1)
-    if args.lock_timeout <= 0:
+    if args.command == "wait_result":
+        for name in ("timeout", "poll_interval", "stall", "start_timeout"):
+            value = getattr(args, name)
+            if not math.isfinite(value) or (value <= 0 if name in ("timeout", "poll_interval") else value < 0):
+                _print_cli_error(args, "invalid_wait_result_args", f"--{name.replace('_', '-')} must be finite and "
+                                 + ("> 0" if name in ("timeout", "poll_interval") else ">= 0"))
+                sys.exit(1)
+        if args.after is not None and (not math.isfinite(args.after) or not 0 <= args.after <= 253402300799):
+            _print_cli_error(args, "invalid_wait_result_args", "--after must be a valid nonnegative Unix timestamp")
+            sys.exit(1)
+        if (args.stall and not args.progress) or (args.start_timeout and (not args.progress or args.after is None)):
+            _print_cli_error(args, "invalid_wait_result_args", "--stall requires --progress; --start-timeout requires --progress and --after")
+            sys.exit(1)
+    if not math.isfinite(args.lock_timeout) or args.lock_timeout <= 0:
         print("Error: --lock-timeout must be > 0", file=sys.stderr)
         sys.exit(1)
 
@@ -655,6 +672,16 @@ def main():
             )
             sys.exit(1)
 
+    # Missing external backends cannot use the Editor. Report before any lease/lock wait.
+    if args.command in ("unicli", "exec", "eval"):
+        _, failure = prepare_unicli(args.project, args.operation, args.unicli_args, args.timeout_ms)
+        if failure is not None:
+            error = failure["error"]
+            _print_cli_error(args, error["code"], error["message"], error.get("details"))
+            setattr(args, "_command_exit_code", 1)
+            _record_command_history(args, command_started_at)
+            sys.exit(1)
+
     # Unity may show native modal dialogs while compiling, refreshing, or
     # reloading scenes. Keep the known-dialog dismisser alive around editor
     # commands, not only immediately after launching Unity.
@@ -684,7 +711,7 @@ def main():
     # Commands that don't need heartbeat
     if args.command == "launch":
         # 複数 session から同時に launch --restart が飛んでくると、デフォルトの
-        # --wait-lock (timeout 1800s) のせいで「前の launch を待ってからまた
+        # --wait-lock のせいで「前の launch を待ってからまた
         # kill→relaunch」と再起動ループになる。launch だけは wait=False で扱い、
         # 既に launch 中ならその場で alreadyRestarting を返してスキップする。
         def _emit_already_restarting(holder: dict | None) -> None:

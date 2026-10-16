@@ -34,9 +34,9 @@ _SESSION_ENV_KEYS = (
 
 
 class EditorLeasedError(Exception):
-    def __init__(self, message: str, details: dict | None = None):
+    def __init__(self, message: str, details: dict | None = None, *, code: str = "editor_leased"):
         super().__init__(message)
-        self.code = "editor_leased"
+        self.code = code
         self.message = message
         self.details = details or {}
 
@@ -77,6 +77,12 @@ def _lease_file_guard(project_root: Path):
         while not acquired and time.monotonic() < deadline:
             time.sleep(0.05)
             acquired = lock_file.try_acquire()
+        if not acquired:
+            raise EditorLeasedError(
+                "Timed out locking the lease file; no lease was changed.",
+                {"lockPath": str(lock_path), "waitedSeconds": 5.0},
+                code="lease_file_busy",
+            )
         try:
             yield
         finally:
@@ -134,7 +140,8 @@ def acquire_lease(
     timeout_s: float = 0.0,
 ) -> dict:
     """lease を取得または延長する。他セッションが有効な lease を持つ場合は待つか失敗する。"""
-    deadline = time.monotonic() + max(0.0, timeout_s)
+    started = time.monotonic()
+    deadline = started + max(0.0, timeout_s)
     while True:
         with _lease_file_guard(project_root):
             current = read_lease(project_root)
@@ -158,9 +165,10 @@ def acquire_lease(
         if not wait or time.monotonic() >= deadline:
             raise EditorLeasedError(
                 "Another session holds the Unity Editor lease for this project.",
-                {"holder": holder, "requestedBy": owner},
+                {"holder": holder, "requestedBy": owner, "waitedSeconds": round(time.monotonic() - started, 3),
+                 "hint": "Use a cloned project for parallel work, or increase --lock-timeout for a planned wait."},
             )
-        time.sleep(LEASE_POLL_SECONDS)
+        time.sleep(min(LEASE_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
 
 def release_lease(project_root: Path, owner: str | None, *, force: bool = False) -> dict:
@@ -218,7 +226,7 @@ def wait_for_foreign_lease(
                     "waitedSeconds": round(time.monotonic() - started, 3),
                 },
             )
-        time.sleep(LEASE_POLL_SECONDS)
+        time.sleep(min(LEASE_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
 
 # --- Play Mode の開始セッション記録 -------------------------------------------

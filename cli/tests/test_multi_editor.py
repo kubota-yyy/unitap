@@ -186,6 +186,37 @@ class LaunchCoexistenceTests(unittest.TestCase):
 
 
 class LeaseTests(unittest.TestCase):
+    def test_lease_guard_timeout_never_enters_unprotected_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = _make_project(Path(tmp) / "game")
+            lease.acquire_lease(game, "owner")
+            before = lease.read_lease(game)
+            clock = [0.0]
+            with patch.object(lease._EditorOperationFileLock, "try_acquire", return_value=False), \
+                    patch.object(lease.time, "monotonic", side_effect=lambda: clock[0]), \
+                    patch.object(lease.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                with self.assertRaises(lease.EditorLeasedError) as raised:
+                    lease.release_lease(game, "other", force=True)
+            self.assertEqual("lease_file_busy", raised.exception.code)
+            self.assertEqual(before, lease.read_lease(game))
+
+    def test_fractional_wait_deadline_does_not_sleep_a_whole_poll(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = _make_project(Path(tmp) / "game")
+            lease.acquire_lease(game, "owner")
+            for acquire in (False, True):
+                with self.subTest(acquire=acquire):
+                    clock = [0.0]
+                    with patch.object(lease.time, "monotonic", side_effect=lambda: clock[0]), \
+                            patch.object(lease.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                        with self.assertRaises(lease.EditorLeasedError) as raised:
+                            if acquire:
+                                lease.acquire_lease(game, "other", wait=True, timeout_s=0.25)
+                            else:
+                                lease.wait_for_foreign_lease(game, "other", wait=True, timeout_s=0.25)
+                    self.assertEqual(0.25, clock[0])
+                    self.assertEqual(0.25, raised.exception.details["waitedSeconds"])
+
     def test_foreign_lease_blocks_and_owner_passes(self):
         with tempfile.TemporaryDirectory() as tmp:
             game = _make_project(Path(tmp) / "game")
@@ -246,6 +277,26 @@ class PlayOwnerGuardTests(unittest.TestCase):
 
 
 class LockPolicyTests(unittest.TestCase):
+    def test_default_lock_wait_is_short_and_explicit_override_is_preserved(self):
+        from unitap_pkg.cli import build_parser
+        parser, _ = build_parser()
+        self.assertEqual(30, parser.parse_args(["status"]).lock_timeout)
+        self.assertEqual(1800, parser.parse_args(["--lock-timeout", "1800", "status"]).lock_timeout)
+
+    def test_operation_lock_timeout_records_wait_in_failure_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = _make_project(Path(tmp) / "game")
+            with editor_lock.editor_operation_lock(game, {"command": "first"}, wait=False, timeout_s=0):
+                clock = [0.0]
+                metadata = {"command": "second"}
+                with patch.object(editor_lock.time, "monotonic", side_effect=lambda: clock[0]), \
+                        patch.object(editor_lock.time, "sleep", side_effect=lambda seconds: clock.__setitem__(0, clock[0] + seconds)):
+                    with self.assertRaises(editor_lock.EditorOperationBusyError) as raised:
+                        with editor_lock.editor_operation_lock(game, metadata, wait=True, timeout_s=0.25):
+                            self.fail("lock must not be acquired")
+                self.assertEqual(250, metadata["lockWaitMs"])
+                self.assertEqual(0.25, raised.exception.details["waitedSeconds"])
+
     def _ns(self, tool, params):
         return argparse.Namespace(command="tool_exec", tool=tool, params=json.dumps(params))
 

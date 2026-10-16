@@ -1,10 +1,28 @@
 import argparse
 import unittest
+from unittest.mock import patch
 
-from unitap_pkg.execution_history import extract_command_context_from_args, summarize_result_payload
+from unitap_pkg.execution_history import build_execution_history_entry, extract_command_context_from_args, summarize_result_payload
 
 
 class ExecutionHistoryTests(unittest.TestCase):
+    def test_nonzero_exit_cannot_be_recorded_as_success(self):
+        with patch("unitap_pkg.execution_history.get_execution_history_path", return_value="unused"):
+            entry = build_execution_history_entry(project_path="/project", args=argparse.Namespace(command="wait_result"),
+                response={"ok": True, "result": {"done": False, "reason": "timeout", "polls": 3, "elapsedSeconds": 2}},
+                started_at_epoch=1000, completed_at_epoch=1002, exit_code=1)
+        self.assertFalse(entry["ok"])
+        self.assertEqual("system_exit", entry["errorCode"])
+        self.assertEqual("timeout", entry["resultSummary"]["reason"])
+        self.assertFalse(entry["resultSummary"]["done"])
+
+    def test_wait_context_records_markers_and_start_requirements_without_contents(self):
+        context = extract_command_context_from_args(argparse.Namespace(command="wait_result", done="/qa/done",
+            progress="/qa/progress", after=1000, start_timeout=10, timeout=60))
+        self.assertEqual("/qa/done", context["requestParams"]["done"])
+        self.assertEqual(10, context["requestParams"]["startTimeout"])
+        self.assertEqual(1000, context["requestParams"]["after"])
+
     def test_launch_context_records_restart_arguments(self):
         args = argparse.Namespace(
             command="launch",

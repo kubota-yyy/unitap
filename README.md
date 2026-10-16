@@ -105,7 +105,7 @@ python3 cli/unitap.py --wait-lock --lock-timeout 900 compile_check --timeout 600
 
 Several Unity Editors (different projects, or per-session clones of one project) can run at once; Unitap only launches, quits and focuses the Editor of `--project`. A session can reserve a project's Editor across several commands with `lease acquire`; other sessions' exclusive commands then wait (or fail with `editor_leased` under `--no-wait-lock`). See [docs/agent-guide.md](docs/agent-guide.md).
 
-Exclusive commands keep a project-scoped lock under `Library/Unitap/.editor-op.lock`. If another long-running or destructive operation is already using Unitap, the default behavior is to wait for the lock. Add `--no-wait-lock` to fail fast with `Error [editor_busy]`, or set `--lock-timeout` to bound the wait.
+Exclusive commands keep a project-scoped lock under `Library/Unitap/.editor-op.lock`. If another long-running or destructive operation is already using Unitap, the default behavior is to wait up to 30 seconds for each lock or lease. Add `--no-wait-lock` to fail fast with `Error [editor_busy]`, or explicitly increase `--lock-timeout` for a planned wait. The lease lifetime (`lease acquire --ttl`, default 1800 seconds) is independent of this wait limit.
 
 ```bash
 # Check editor status

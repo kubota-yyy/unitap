@@ -351,6 +351,8 @@ def _build_busy_details(
         "lockPath": str(_editor_operation_lock_path(project_root)),
         "metadataPath": str(_editor_operation_metadata_path(project_root)),
         "waited": waited,
+        "waitedSeconds": round(float(metadata.get("lockWaitMs", 0)) / 1000, 3),
+        "hint": "Inspect the holder with editors/lease status. Use a cloned project for parallel work, or increase --lock-timeout for a planned wait.",
     }
     if timeout_s is not None:
         details["lockTimeoutSeconds"] = timeout_s
@@ -366,9 +368,10 @@ def editor_operation_lock(project_root: Path, metadata: dict, *, wait: bool, tim
         deadline = wait_started + max(timeout_s, 0.0)
 
         while not acquired and wait and time.monotonic() < deadline:
-            time.sleep(EDITOR_OPERATION_POLL_SECONDS)
+            time.sleep(min(EDITOR_OPERATION_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
             acquired = lock_file.try_acquire()
 
+        metadata["lockWaitMs"] = int((time.monotonic() - wait_started) * 1000)
         if not acquired:
             if wait:
                 message = "Timed out waiting for another Unitap editor operation to finish."
@@ -379,7 +382,6 @@ def editor_operation_lock(project_root: Path, metadata: dict, *, wait: bool, tim
                 _build_busy_details(project_root, metadata, waited=wait, timeout_s=timeout_s if wait else None),
             )
 
-        metadata["lockWaitMs"] = int((time.monotonic() - wait_started) * 1000)
         _write_editor_operation_metadata(project_root, metadata)
         try:
             yield

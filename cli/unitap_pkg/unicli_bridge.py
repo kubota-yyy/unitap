@@ -26,13 +26,13 @@ def register(subparsers, dispatch_table):
         dispatch_table[operation] = do_unicli
 
 
-def run_unicli(project, operation, forwarded=(), timeout_ms=90000):
-    """Return an envelope without printing; callers own locking and history."""
+def prepare_unicli(project, operation, forwarded=(), timeout_ms=90000):
+    """Validate without running the backend, focusing Unity or waiting for locks."""
     def fail(code, message, details=None):
         payload = {"ok": False, "backend": "unicli", "error": {"code": code, "message": message}}
         if details is not None:
             payload["error"]["details"] = details
-        return payload
+        return None, payload
 
     if timeout_ms <= 0:
         return fail("invalid_timeout", "--timeout-ms must be > 0")
@@ -50,6 +50,22 @@ def run_unicli(project, operation, forwarded=(), timeout_ms=90000):
     # 対象projectとtimeoutは入口で一元管理し、ロック対象との食い違いを防ぐ。
     if any(value.split("=", 1)[0] in ("--project", "--timeout") for value in forwarded):
         return fail("conflicting_option", "Use unitap --project and unicli --timeout-ms before the operation.")
+    return binary, None
+
+
+def run_unicli(project, operation, forwarded=(), timeout_ms=90000):
+    """Return an envelope without printing; callers own locking and history."""
+    binary, failure = prepare_unicli(project, operation, forwarded, timeout_ms)
+    if failure is not None:
+        return failure
+
+    def fail(code, message, details=None):
+        payload = {"ok": False, "backend": "unicli", "error": {"code": code, "message": message}}
+        if details is not None:
+            payload["error"]["details"] = details
+        return payload
+
+    forwarded = list(forwarded)
     command = [binary, operation, *forwarded]
     if "--json" not in forwarded:
         command.append("--json")

@@ -1,4 +1,5 @@
 import argparse
+import os
 import io
 import json
 import subprocess
@@ -9,7 +10,7 @@ from pathlib import Path
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from unitap_pkg import unicli_bridge, editor_lock
+from unitap_pkg import unicli_bridge, editor_lock, lease
 
 
 class UniCliBridgeTests(unittest.TestCase):
@@ -78,9 +79,28 @@ class UniCliBridgeTests(unittest.TestCase):
             for operation in [['unicli', 'exec', 'PlayMode.Status'], ['exec', 'PlayMode.Status'], ['eval', 'return 1;']]:
                 with editor_lock.editor_operation_lock(project, {'command': 'compile_check'}, wait=False, timeout_s=0):
                     result = subprocess.run([sys.executable, str(cli), '--project', str(project),
-                        '--no-wait-lock', '--json', *operation], capture_output=True, text=True, timeout=10)
+                        '--no-wait-lock', '--json', *operation], capture_output=True, text=True, timeout=10,
+                        env=dict(os.environ, UNITAP_UNICLI_BIN=sys.executable))
                 self.assertEqual(1, result.returncode)
                 self.assertEqual('editor_busy', json.loads(result.stdout)['error']['code'])
+
+    def test_missing_backend_fails_before_foreign_lease_or_operation_lock_wait(self):
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            (project / 'Assets').mkdir()
+            (project / 'ProjectSettings').mkdir()
+            lease.acquire_lease(project, 'another-session')
+            cli = Path(__file__).resolve().parents[1] / 'unitap.py'
+            with editor_lock.editor_operation_lock(project, {'command': 'compile_check'}, wait=False, timeout_s=0):
+                result = subprocess.run([sys.executable, str(cli), '--project', str(project), '--json',
+                    'eval', 'return 1;'], capture_output=True, text=True, timeout=5,
+                    env=dict(os.environ, UNITAP_UNICLI_BIN='/unitap-test/missing-unicli'))
+            self.assertEqual(1, result.returncode)
+            self.assertEqual('unicli_not_found', json.loads(result.stdout)['error']['code'])
+            history = json.loads((project / 'Library/Unitap/execution-history.jsonl').read_text().splitlines()[-1])
+            self.assertFalse(history['ok'])
+            self.assertEqual('unicli_not_found', history['errorCode'])
+            self.assertEqual('another-session', lease.read_lease(project)['owner'])
 
     def test_aliases_preserve_locking_and_history_redaction(self):
         from unitap_pkg.cli import build_parser

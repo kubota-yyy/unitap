@@ -3,6 +3,7 @@ import os
 import socket
 import sys
 import time
+from datetime import datetime, timezone
 
 from .constants import (
     CONNECTION_RETRY_INTERVAL,
@@ -799,12 +800,14 @@ def do_wait_fsm(args, port: int) -> None:
         poll_interval_seconds=args.poll_interval,
     )
     result = merge_wait_meta_into_result(args, result)
-    print_unitap_response(args, {"ok": True, "result": result})
-    if not result.get("matched"):
-        sys.exit(1)
+    response = {"ok": bool(result.get("matched")), "result": result}
+    if not response["ok"]:
+        response["error"] = {"code": "wait_fsm_timeout", "message": "FSM did not reach the requested state before timeout."}
+    print_unitap_response(args, response)
 
 
-def wait_for_result_file(args, port: int, status_fn=None, console_fn=None, now_fn=time.time, sleep_fn=time.sleep) -> dict:
+def wait_for_result_file(args, port: int, status_fn=None, console_fn=None, now_fn=time.time,
+                         sleep_fn=time.sleep, monotonic_fn=time.monotonic) -> dict:
     """Wait for a QA script's done/fail file, but stop as soon as waiting can no longer succeed.
 
     Ends early on: the fail file, a new console error/exception, Play Mode exiting (--require-playing),
@@ -813,16 +816,32 @@ def wait_for_result_file(args, port: int, status_fn=None, console_fn=None, now_f
     status_fn = status_fn or (lambda: send_unitap_sync(args, port, "status", {}, timeout_ms=3000, retryable=True))
     console_fn = console_fn or (lambda since: send_unitap_sync(
         args, port, "read_console", {"type": "error", "since": since, "limit": 5}, timeout_ms=3000, retryable=True))
-    started = now_fn()
-    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started - 1))
+    started = monotonic_fn()
+    after = getattr(args, "after", None)
+    since = datetime.fromtimestamp(after if after is not None else now_fn() - 1, tz=timezone.utc).isoformat()
     timeout = max(float(args.timeout), 1.0)
     interval = max(float(args.poll_interval), 0.2)
     stall = float(args.stall) if args.stall else 0
     polls = 0
     seen_playing = False
+    start_timeout = float(getattr(args, "start_timeout", 0) or 0)
+    progress_started = False
+    last_progress_signature = None
+    last_progress_at = started
 
     def finish(reason, **extra):
-        return dict({"done": reason == "done", "reason": reason, "elapsedSeconds": round(now_fn() - started, 2), "polls": polls}, **extra)
+        return dict({"done": reason == "done", "reason": reason,
+                     "elapsedSeconds": round(monotonic_fn() - started, 2), "polls": polls,
+                     "progressStarted": progress_started}, **extra)
+
+    def fresh_stat(path):
+        if not path:
+            return None
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        return stat if after is None or stat.st_mtime >= after else None
 
     def head(path, limit=2000):
         try:
@@ -833,10 +852,18 @@ def wait_for_result_file(args, port: int, status_fn=None, console_fn=None, now_f
 
     while True:
         polls += 1
-        if os.path.exists(args.done):
-            return finish("done", content=head(args.done, 500))
-        if args.fail and os.path.exists(args.fail):
+        # A run that wrote both markers failed. Old markers can be excluded with --after.
+        if fresh_stat(args.fail) is not None:
             return finish("failure_file", content=head(args.fail))
+        if fresh_stat(args.done) is not None:
+            return finish("done", content=head(args.done, 500))
+        progress_stat = fresh_stat(args.progress)
+        if progress_stat is not None:
+            signature = (progress_stat.st_mtime_ns, progress_stat.st_size)
+            if signature != last_progress_signature:
+                last_progress_signature = signature
+                last_progress_at = monotonic_fn()
+                progress_started = True
         try:
             status = status_fn()
         except Exception:
@@ -856,21 +883,31 @@ def wait_for_result_file(args, port: int, status_fn=None, console_fn=None, now_f
             if entries:
                 return finish("console_error", errors=[{"type": e.get("type"), "message": (e.get("message") or "")[:500],
                                                          "stackTrace": (e.get("stackTrace") or "")[:1200]} for e in entries])
-        if stall and args.progress:
-            last = os.path.getmtime(args.progress) if os.path.exists(args.progress) else started
-            if now_fn() - max(last, started) > stall:
+        elapsed = monotonic_fn() - started
+        if start_timeout and not progress_started and elapsed >= start_timeout:
+            return finish("not_started")
+        if stall and args.progress and (progress_started or not start_timeout):
+            stale_seconds = monotonic_fn() - last_progress_at
+            if stale_seconds >= stall:
                 lines = head(args.progress, 20000).strip().splitlines()
-                return finish("stalled", lastProgress=lines[-1] if lines else "", staleSeconds=round(now_fn() - max(last, started), 1))
-        if now_fn() - started >= timeout:
+                return finish("stalled", lastProgress=lines[-1] if lines else "", staleSeconds=round(stale_seconds, 1))
+        if elapsed >= timeout:
             return finish("timeout")
-        sleep_fn(interval)
+        remaining = timeout - elapsed
+        if start_timeout and not progress_started:
+            remaining = min(remaining, start_timeout - elapsed)
+        if stall and args.progress and (progress_started or not start_timeout):
+            remaining = min(remaining, stall - (monotonic_fn() - last_progress_at))
+        sleep_fn(max(0, min(interval, remaining)))
 
 
 def do_wait_result(args, port: int) -> None:
     result = wait_for_result_file(args, port)
-    print_unitap_response(args, {"ok": True, "result": result})
-    if not result.get("done"):
-        sys.exit(1)
+    response = {"ok": bool(result.get("done")), "result": result}
+    if not response["ok"]:
+        reason = result.get("reason", "unknown")
+        response["error"] = {"code": f"wait_result_{reason}", "message": f"QA result wait stopped: {reason}."}
+    print_unitap_response(args, response)
 
 
 def do_play(args, port: int) -> None:

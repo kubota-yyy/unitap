@@ -25,8 +25,10 @@ _SUMMARY_KEYS = (
     "compileStarted",
     "compiled",
     "count",
+    "done",
     "duplicate",
     "errorCount",
+    "elapsedSeconds",
     "expectedBuildTarget",
     "firstError",
     "firstFailedStep",
@@ -37,17 +39,22 @@ _SUMMARY_KEYS = (
     "isUpdating",
     "jobId",
     "message",
+    "matched",
     "outputDir",
     "platform",
     "port",
+    "polls",
+    "progressStarted",
     "profile",
     "qualityGateFailed",
     "qualityGateReasons",
     "rawSuccess",
+    "reason",
     "reportDir",
     "resultJson",
     "runtimeErrorCount",
     "status",
+    "staleSeconds",
     "success",
     "suiteName",
     "testCasePath",
@@ -218,6 +225,17 @@ def extract_command_context_from_args(args) -> dict:
         context["requestParams"] = {"menuPath": context["menuPath"]}
         return context
 
+    if command == "wait_result":
+        context["requestParams"] = {
+            key: getattr(args, attr, None) for key, attr in (
+                ("done", "done"), ("fail", "fail"), ("progress", "progress"),
+                ("after", "after"), ("startTimeout", "start_timeout"), ("stall", "stall"),
+                ("timeout", "timeout"), ("pollInterval", "poll_interval"),
+                ("requirePlaying", "require_playing"), ("ignoreErrors", "ignore_errors"),
+            )
+        }
+        return context
+
     if command == "launch":
         context["requestParams"] = {
             "restart": bool(getattr(args, "restart", False)),
@@ -303,7 +321,7 @@ def build_execution_history_entry(
 
     if isinstance(response, dict):
         if isinstance(response.get("ok"), bool):
-            ok = bool(response.get("ok"))
+            ok = bool(response.get("ok")) and exit_code in (None, 0)
         error = response.get("error")
         if isinstance(error, dict):
             error_code = error.get("code")

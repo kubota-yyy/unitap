@@ -49,7 +49,7 @@ unitap --json exec --timeout-ms 180000 TestRunner.RunEditMode --assemblies Rabbi
 
 `exec` / `eval` は `unicli exec` / `unicli eval` と同じ実装を使う。グローバルの `--project` / `--json` / `--no-wait-lock` はサブコマンドの前、`--timeout-ms` は実行対象名や C# の前に置く。長い形は `unicli --timeout-ms 180000 exec ...`。子 CLI に別の `--project` / `--timeout` を渡せない。
 
-UniCLI コマンドの引数調査には `describe unicli:NAME` を使う。`exec NAME --help` は UniCLI がテキストを返すため、JSON ブリッジでは不正応答扱いになる。
+UniCLI コマンドの引数調査には `describe unicli:NAME` を使う。`exec NAME --help` は UniCLI がテキストを返すため、JSON ブリッジでは不正応答扱いになる。未導入の UniCLI と不正な引数は、Editor の lease・排他ロックを待つ前に失敗を返す。`unicli_not_found` が出たら同じ呼び出しを繰り返さず、利用プロジェクトの導入方針と `commands --live` の利用可能な経路を確認する。
 
 ## 成功・失敗を判断する
 
@@ -58,14 +58,23 @@ UniCLI コマンドの引数調査には `describe unicli:NAME` を使う。`exe
 - ビルドは返却結果とローカル成果物、画面変更は保存 capture の目視まで確認する。
 - pending / jobId は開始の証拠であり完了ではない。該当ツールの polling スキーマに従う。プロジェクト固有の `run_automate_test` / `run_playmode_test` ラッパーは、カタログに存在するときだけ利用する。
 - タイムアウト後も Unity 側処理が継続する場合がある。状態・ログを調べ、同じ変更を自動再送しない。別バックエンドによる同一操作の再送もしない。
-- メニュー等で開始した Play Mode の QA スクリプトは、完了ファイルを固定時間 polling せず `wait_result` で待つ。例: `unitap --json wait_result --done <dir>/done.txt --fail <dir>/failure.txt --progress <dir>/progress.txt --stall 30 --require-playing --timeout 300`。新しいコンソールエラー、Play Mode の終了、進捗ファイルの停滞、失敗ファイルのいずれかで即座に終了し、`result.reason` に理由（`done` / `failure_file` / `console_error` / `play_mode_exited` / `not_playing` / `stalled` / `timeout`）を返す。スクリプト側は各段階で進捗ファイルに追記する。
+- メニュー等で開始した Play Mode の QA スクリプトは `wait_result` で待つ。開始前の Unix timestamp を `--after` に渡し、前回の完了・失敗・進捗ファイルを除外する。`--progress` と `--start-timeout` を併用すると、新しい進捗が出ない QA を `not_started` で打ち切れる。メニュー実行の `ok` を確認してから待機し、スクリプト側は開始時と各段階で進捗ファイルに追記する。マーカーのパスは絶対パスを推奨する。
+- `wait_result` は `result.reason` に `done` / `failure_file` / `console_error` / `play_mode_exited` / `not_playing` / `not_started` / `stalled` / `timeout` を返す。成功は `done` のみ。失敗時は `ok: false`、終了コード1、`error.code: wait_result_<reason>` となり、詳細は `result` に残る。同じ実行の完了・失敗ファイルが両方あれば失敗を優先する。`--after` を省略した既存の呼び出しではファイルの新旧を区別しない。
 - Unity は入れ子のコルーチン（`yield return OtherEnumerator()`）内の例外をログに出すだけで、親は再開も失敗もしない。QA スクリプトの外側で try/catch する場合は、入れ子の IEnumerator も自前で MoveNext して例外を失敗ファイルに書く。
 - `read_console` のログはドメインリロード（Play の開始・停止、コンパイル）をまたいで保持される。`compile_check` は実行時にクリアする。`--since` は UTC の ISO8601（`Z` 付き）で指定する。
 - UniCLI eval がコンパイルに失敗したらエラーを確認し、必要に応じて `compile_check` 後に状態を再確認する。eval のコード変更と Editor の復旧を区別する。
 
 `exec` / `eval` は既存の `Library/Unitap/.editor-op.lock` を保持し、同じ正規化プロジェクトをロック・cwd・`UNICLI_PROJECT` に使う。汎用コマンドの副作用は自動推測せず、全 exec / eval を排他にする。`unicli check/status/commands` と機能探索はロックを取得しない。独自ツールの排他は既存のツール別ポリシーに従い、カタログの `lockPolicy` に表示する。
 
-排他は Unitap を経由する処理にのみ有効。非同期処理が開始応答を返した後までロックが継続する保証はない。履歴は `Library/Unitap/execution-history.jsonl`（8MB で `.1.jsonl` に 1 世代だけ退避。`UNITAP_HISTORY_MAX_BYTES` で変更、0 で無制限）。各行にセッション ID・lock/lease 待ち時間を残す。exec / eval は backend・operation・コマンド名・timeout のみを要求情報に記録し、C# 本文や追加引数を記録しない。機能探索は履歴を増やさない。
+QA 開始前に時刻を記録し、その後にメニュー実行と成功確認を行う。例えば Python の `time.time()` で得た値を `<started>` に渡す。
+
+```sh
+unitap --json wait_result --done <dir>/done.txt --fail <dir>/failure.txt --progress <dir>/progress.txt --after <started> --start-timeout 15 --stall 30 --require-playing --timeout 300
+```
+
+`--after` 指定時のコンソール監視もその時刻から始まる。開始確認や停滞の時間は、Unitap が待機を始めた時点・進捗の変更を検知した時点から単調時計で計測する。エラー検出と Editor への状態照会は従来どおり行い、開始待ち中でも検出した失敗は先に返す。
+
+排他は Unitap を経由する処理にのみ有効。非同期処理が開始応答を返した後までロックが継続する保証はない。履歴は `Library/Unitap/execution-history.jsonl`（8MB で `.1.jsonl` に 1 世代だけ退避。`UNITAP_HISTORY_MAX_BYTES` で変更、0 で無制限）。各行にセッション ID・lock/lease 待ち時間を残し、終了コードが非0なら成功として記録しない。`wait_result` はマーカーのパス・待機条件・終了理由・経過秒・開始検知の有無を記録する。exec / eval は backend・operation・コマンド名・timeout のみを要求情報に記録し、C# 本文や追加引数を記録しない。機能探索は履歴を増やさない。
 
 ## 複数 Editor・複数セッションで使う
 
@@ -88,6 +97,8 @@ unitap --json lease acquire --ttl 1800 --note "PlayMode QA: shop"
 unitap --json lease release
 unitap --json lease status
 ```
+
+競合する lease と排他ロックの待ち時間は、それぞれ既定30秒。長く待つ予定がある場合だけ、サブコマンドの前に `--lock-timeout 1800` などを明示する。lease 自体の有効期限（`--ttl`、既定1800秒）とは別の値。取得できなかった場合も履歴に待機時間を残す。lease ファイルの更新用ロックを取得できなければ `lease_file_busy` で終了し、lease を変更しない。
 
 終了し忘れた lease は期限で自動失効する。所有セッションが既に存在しない場合だけ `lease release --force` または各コマンドの `--ignore-lease` を使う。
 
