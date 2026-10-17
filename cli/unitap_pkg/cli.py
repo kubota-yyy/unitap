@@ -300,6 +300,12 @@ def build_parser():
     p_menu = subparsers.add_parser("execute_menu", help="Execute a Unity menu item by menuPath")
     p_menu.add_argument("--menuPath", required=True)
     p_menu.add_argument("--timeout-ms", type=int, default=180000, help="Request timeout in ms")
+    p_menu.add_argument(
+        "--allow-repeat",
+        action="store_true",
+        help="Run a QA menu again although the project is unchanged since its last run "
+             "(only when that run ended without a result)",
+    )
 
     subparsers.add_parser("refresh", help="Refresh the AssetDatabase")
 

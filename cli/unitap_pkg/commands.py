@@ -11,7 +11,9 @@ from .constants import (
     DEFAULT_TIMEOUT_MS,
     POLL_INTERVAL,
 )
+from . import qa_repeat
 from .editor_lock import enrich_diagnose_result_with_editor_lock
+from .lease import resolve_session_owner
 from .editor_log import find_project_root, read_compile_errors, summarize_project_editor_activity
 from .heartbeat import check_heartbeat_fresh, check_heartbeat_frozen, find_heartbeat
 from .image_quality import inspect_capture_image
@@ -1209,6 +1211,34 @@ LONG_RUNNING_TOOL_TIMEOUTS_MS = {
 }
 
 
+def _check_qa_repeat(args, menu_path: str) -> None:
+    """Refuse a QA menu rerun on an unchanged project (unless --allow-repeat)."""
+    if getattr(args, "allow_repeat", False):
+        return
+    previous = qa_repeat.check_repeat(find_project_root(args.project), menu_path)
+    if previous is None:
+        return
+    payload = {
+        "ok": False,
+        "error": {
+            "code": "qa_repeat_unchanged",
+            "message": (
+                f"'{menu_path}' は前回（{previous.get('at')}）から Assets・Packages・ProjectSettings が"
+                "変わっていないので流しません。同じQAをコードを変えずに繰り返しても結果は同じです。"
+                "前回の結果ファイルの失敗内容と撮影を見て原因を直してから流してください。"
+                "前回の実行が Editor の不調などで結果を出さずに終わった時だけ --allow-repeat を付けます。"
+            ),
+            "details": {"menuPath": menu_path, "previousRun": previous, "override": "--allow-repeat"},
+        },
+    }
+    setattr(args, "_last_unitap_response", payload)
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+    else:
+        print(f"Error: {payload['error']['message']}", file=sys.stderr)
+    sys.exit(2)
+
+
 def _check_execute_menu_blocklist(args, menu_path: str) -> None:
     if not menu_path:
         return
@@ -1431,6 +1461,7 @@ def do_sync_command(args, port: int) -> None:
 
     if args.command == "execute_menu":
         _check_execute_menu_blocklist(args, args.menuPath)
+        _check_qa_repeat(args, args.menuPath)
         params = {"menuPath": args.menuPath}
         timeout_ms = int(getattr(args, "timeout_ms", timeout_ms) or timeout_ms)
         retryable = False
@@ -1521,6 +1552,9 @@ def do_sync_command(args, port: int) -> None:
         )
     elif args.command == "tool_exec":
         resp = _mark_pending_tool_exec_response(resp)
+
+    if isinstance(resp, dict) and resp.get("ok") and args.command == "execute_menu":
+        qa_repeat.record_run(find_project_root(args.project), args.menuPath, resolve_session_owner())
 
     if isinstance(resp, dict) and resp.get("ok"):
         result = resp.get("result", {})
