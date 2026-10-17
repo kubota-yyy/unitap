@@ -85,6 +85,8 @@ unitap --json wait_result --done <dir>/done.txt --fail <dir>/failure.txt --progr
 - Editor の終了は `quit`（このプロジェクトの Editor だけ）。`execute_menu File/Quit` は拒否される。
 - `focus` / `compile_check` の前面化は対象プロジェクトの PID だけを扱い、見つからなければ別の Unity を前面化せず失敗する。
 - `editors` でマシン上の全 Editor（プロジェクト・PID・メモリ・heartbeat・排他ロック・lease 保持者）を確認できる。
+- 起動・コンパイル中の既知のダイアログ（Enter Safe Mode? は Ignore、Corrupted Library は Rebuild、外部変更されたシーンは Reload、UI Toolkit Particles は Cancel）は、Editor コマンドの間に動く監視が、開いているすべての Editor について自動で押す（macOS のアクセシビリティ権限が必要）。Safe Mode が出たのはコンパイルエラーがある合図なので、続けて `compile_check` / `read_console` でエラーを直す。
+- Editor の heartbeat が `None`・stale のまま起動待ちが進まない時は、同じ待ちを繰り返さない。`editors` で対象 PID を確かめ、ダイアログが残っていないかを見る（例：System Events で `name of every button of every window of (first process whose unix id is <PID>)`。同名プロセスは保存した参照だと最初の Unity に解決されるので、PID で毎回指定する）。既知のダイアログなら上の監視と同じボタンを押して続ける。未知のダイアログ・押してはいけないもの（保存の確認など）は押さず、画面の内容を添えてユーザーに知らせる。
 - `--project` を明示した時は、そのプロジェクトの heartbeat だけを使う。Library ごと複製したプロジェクトに残った元 Editor の heartbeat（`projectPath` 不一致）は無視する。
 
 同じプロジェクトを複数セッションが使う場合は、次のどちらかを選ぶ。
