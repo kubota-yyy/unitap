@@ -35,6 +35,15 @@ class SafeModeDialogTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertEqual(str(expected).lower(), result.stdout.strip())
 
+    def test_watcher_addresses_each_editor_by_unix_id(self):
+        # With several Editors open, a stored "application process "Unity"" reference resolves
+        # to the first Unity, so a Safe Mode prompt in any other Editor stayed open (2026-10-17).
+        script = _STARTUP_DIALOG_DISMISS_SCRIPT
+        self.assertIn('unix id of (every process whose name is "Unity")', script)
+        self.assertIn("(first process whose unix id is editorPid)", script)
+        self.assertNotIn("repeat with p in unityProcs", script)
+        self.assertNotIn("every window of p", script)
+
     def test_complete_watcher_script_compiles(self):
         # Compile only: never click a live Editor's dialogs during this test.
         with tempfile.TemporaryDirectory() as tmp:

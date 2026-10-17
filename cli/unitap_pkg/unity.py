@@ -67,6 +67,55 @@ end isSafeModeDialog
 
 _STARTUP_DIALOG_DISMISS_SCRIPT = (
     f"-- {_STARTUP_DIALOG_DISMISS_MARKER}\n" + _SAFE_MODE_DIALOG_MATCHER + r'''
+on clickButton(editorPid, j, buttonName)
+    tell application "System Events" to click button buttonName of window j of (first process whose unix id is editorPid)
+end clickButton
+
+on handleWindow(editorPid, j)
+    tell application "System Events"
+        set wName to name of window j of (first process whose unix id is editorPid)
+        set buttonNames to {}
+        try
+            set buttonNames to name of every button of window j of (first process whose unix id is editorPid)
+        end try
+        set textValues to {}
+        try
+            set textValues to value of every static text of window j of (first process whose unix id is editorPid)
+        end try
+    end tell
+    if wName is missing value then set wName to ""
+    set dialogText to wName
+    repeat with textValue in textValues
+        try
+            set dialogText to dialogText & " " & (textValue as text)
+        end try
+    end repeat
+    if my isSafeModeDialog(dialogText, buttonNames) then
+        try
+            my clickButton(editorPid, j, "Ignore")
+        end try
+    end if
+    if wName contains "Corrupted Library Detected" then
+        try
+            my clickButton(editorPid, j, "Rebuild Library")
+        end try
+    end if
+    if buttonNames contains "Reload" and buttonNames contains "Ignore" then
+        if dialogText contains "open scene" or dialogText contains "open scene(s)" or dialogText contains "changed on disk" then
+            try
+                my clickButton(editorPid, j, "Reload")
+            end try
+        end if
+    end if
+    if buttonNames contains "Cancel" and buttonNames contains "Open manual" then
+        if dialogText contains "UI Toolkit Particles" then
+            try
+                my clickButton(editorPid, j, "Cancel")
+            end try
+        end if
+    end if
+end handleWindow
+
 on run argv
     set timeoutSeconds to 90
     if (count of argv) is greater than 0 then
@@ -78,54 +127,21 @@ on run argv
     set deadline to (current date) + timeoutSeconds
     repeat while (current date) < deadline
         try
-            tell application "System Events"
-                set unityProcs to (every process whose name is "Unity")
-                repeat with p in unityProcs
-                    try
-                        set winList to (every window of p)
-                        repeat with w in winList
-                            try
-                                set wName to name of w
-                                set buttonNames to {}
-                                try
-                                    set buttonNames to name of every button of w
-                                end try
-                                set dialogText to wName
-                                try
-                                    set textValues to value of every static text of w
-                                    repeat with textValue in textValues
-                                        set dialogText to dialogText & " " & (textValue as text)
-                                    end repeat
-                                end try
-                                if my isSafeModeDialog(dialogText, buttonNames) then
-                                    try
-                                        click button "Ignore" of w
-                                    end try
-                                end if
-                                if wName contains "Corrupted Library Detected" then
-                                    try
-                                        click button "Rebuild Library" of w
-                                    end try
-                                end if
-                                if buttonNames contains "Reload" and buttonNames contains "Ignore" then
-                                    if dialogText contains "open scene" or dialogText contains "open scene(s)" or dialogText contains "changed on disk" then
-                                        try
-                                            click button "Reload" of w
-                                        end try
-                                    end if
-                                end if
-                                if buttonNames contains "Cancel" and buttonNames contains "Open manual" then
-                                    if dialogText contains "UI Toolkit Particles" then
-                                        try
-                                            click button "Cancel" of w
-                                        end try
-                                    end if
-                                end if
-                            end try
-                        end repeat
-                    end try
-                end repeat
-            end tell
+            -- Every Editor is a process named "Unity". A stored reference to one of them
+            -- ("application process "Unity"") resolves to the first Unity, so a dialog in any
+            -- other Editor was never seen. Address each Editor by unix id, inline, every time.
+            tell application "System Events" to set unityPids to unix id of (every process whose name is "Unity")
+            repeat with pidItem in unityPids
+                set editorPid to pidItem as integer
+                try
+                    tell application "System Events" to set winCount to count of windows of (first process whose unix id is editorPid)
+                    repeat with j from 1 to winCount
+                        try
+                            my handleWindow(editorPid, j)
+                        end try
+                    end repeat
+                end try
+            end repeat
         end try
         delay 0.5
     end repeat
