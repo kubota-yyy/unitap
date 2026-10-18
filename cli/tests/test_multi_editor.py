@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from unitap_pkg import clone, commands, editor_lock, execution_history, heartbeat, lease, transport, unity
+from unitap_pkg import clone, commands, editor_lock, execution_history, heartbeat, lease, session_commands, transport, unity
 
 
 def _make_project(root: Path) -> Path:
@@ -418,6 +418,61 @@ class CloneTests(unittest.TestCase):
             self.assertEqual("snapshot", result["mode"])
             self.assertEqual("b", (cloned / "Assets" / "b.txt").read_text())
             self.assertFalse((cloned / "Temp").exists())
+
+
+class QuitReliabilityTests(unittest.TestCase):
+    def _quit(self, project: Path) -> tuple[dict, bool]:
+        args = argparse.Namespace(project=str(project), json=True)
+        stdout = io.StringIO()
+        failed = False
+        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
+            try:
+                session_commands.do_quit(args)
+            except SystemExit:
+                failed = True
+        return json.loads(stdout.getvalue()), failed
+
+    def test_ps_timeout_is_not_reported_as_not_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = _make_project(Path(tmp) / "game")
+            timeout = subprocess.TimeoutExpired(["ps"], 5)
+            with patch.object(unity.subprocess, "run", side_effect=timeout):
+                payload, failed = self._quit(project)
+            self.assertTrue(failed)
+            self.assertEqual("process_list_failed", payload["error"]["code"])
+
+    def test_fresh_heartbeat_with_live_pid_blocks_false_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = _make_project(Path(tmp) / "game")
+            hb = {"pid": os.getpid(), "lastHeartbeat": datetime.now(timezone.utc).isoformat()}
+            with patch.object(session_commands, "list_unity_processes", return_value=[]), \
+                    patch.object(session_commands, "find_heartbeat", return_value=hb):
+                payload, failed = self._quit(project)
+            self.assertTrue(failed)
+            self.assertEqual("unity_quit_unconfirmed", payload["error"]["code"])
+
+    def test_not_running_is_still_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = _make_project(Path(tmp) / "game")
+            with patch.object(session_commands, "list_unity_processes", return_value=[]), \
+                    patch.object(session_commands, "find_heartbeat", return_value=None):
+                payload, failed = self._quit(project)
+            self.assertFalse(failed)
+            self.assertFalse(payload["result"]["quit"])
+
+    def test_last_history_entry_ignores_listing_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = _make_project(Path(tmp) / "game")
+            path = execution_history.get_execution_history_path(str(project))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            rows = [
+                {"command": "compile_check", "timestamp": "2026-10-16T11:35:18+00:00", "session": "claude:a"},
+                {"command": "editors", "timestamp": "2026-10-18T00:00:00+00:00", "session": "claude:b"},
+            ]
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            last = execution_history.last_history_entry(str(project))
+            self.assertEqual("compile_check", last["command"])
+            self.assertEqual("claude:a", last["session"])
 
 
 if __name__ == "__main__":

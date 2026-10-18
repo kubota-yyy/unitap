@@ -331,21 +331,42 @@ def _command_matches_project(command: str, project_root: Path) -> bool:
     return _is_same_project_path(command_project, project_root)
 
 
-def _list_unity_processes(project_root: Path | None = None) -> list[tuple[int, str]]:
-    import subprocess
+class UnityProcessListError(RuntimeError):
+    """ps で Editor 一覧を取れなかった (「起動していない」と区別するため)。"""
 
+
+_PS_TIMEOUTS_SECONDS = (5.0, 20.0)
+
+
+def _read_process_table() -> str | None:
+    # Editor を何台も動かしている高負荷時は ps が 5 秒を超えることがある。
+    # 空の一覧として扱うと quit が「起動していない」と誤って成功するため、長めに再試行する。
+    for timeout in _PS_TIMEOUTS_SECONDS:
+        try:
+            result = subprocess.run(
+                ["ps", "axww", "-o", "pid=", "-o", "command="],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        except OSError:
+            return None
+        if result.returncode == 0:
+            return result.stdout
+    return None
+
+
+def _list_unity_processes(project_root: Path | None = None, strict: bool = False) -> list[tuple[int, str]]:
     processes: list[tuple[int, str]] = []
-    try:
-        result = subprocess.run(
-            ["ps", "axww", "-o", "pid=", "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (subprocess.TimeoutExpired, OSError):
+    table = _read_process_table()
+    if table is None:
+        if strict:
+            raise UnityProcessListError("Could not read the process table (ps failed or timed out).")
         return processes
 
-    for line in result.stdout.splitlines():
+    for line in table.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
@@ -385,9 +406,9 @@ def is_unity_process_running(project_root: Path | None = None) -> bool:
     return bool(_list_unity_processes(project_root))
 
 
-def list_unity_processes(project_root: Path | None = None) -> list[dict]:
+def list_unity_processes(project_root: Path | None = None, strict: bool = False) -> list[dict]:
     entries: list[dict] = []
-    for pid, command in _list_unity_processes(project_root):
+    for pid, command in _list_unity_processes(project_root, strict=strict):
         entries.append({
             "pid": pid,
             "command": command,
@@ -429,11 +450,11 @@ def clean_recovery_files(project_root: Path) -> list[str]:
     return removed
 
 
-def kill_unity_processes(project_root: Path | None = None) -> list[int]:
+def kill_unity_processes(project_root: Path | None = None, strict: bool = False) -> list[int]:
     """Unity プロセスを終了させる。project_root 指定時はそのプロジェクトのみ対象"""
     import signal
 
-    targets = _list_unity_processes(project_root)
+    targets = _list_unity_processes(project_root, strict=strict)
     if not targets:
         return []
 
@@ -444,7 +465,11 @@ def kill_unity_processes(project_root: Path | None = None) -> list[int]:
 
     can_quit_by_app = True
     if project_root is not None:
-        can_quit_by_app = len(_list_unity_processes()) == len(targets)
+        # 一覧を取れない時に「全部このプロジェクト」と見なすと、アプリ全体の quit で他の Editor まで閉じる
+        try:
+            can_quit_by_app = len(_list_unity_processes(strict=True)) == len(targets)
+        except UnityProcessListError:
+            can_quit_by_app = False
 
     if platform.system().lower() == "darwin" and can_quit_by_app:
         try:

@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- `quit` no longer reports "Unity is not running" when the process table could not be read (slow `ps` under load is retried, then fails with `process_list_failed`) or when a fresh heartbeat PID is still alive (`unity_quit_unconfirmed`). `editors` shows each Editor's last command, session and `idleMinutes` so Editors left open by finished sessions are easy to spot; the agent guide asks agents to quit their Editors when work ends.
 - Single source of truth: consumers pin this repository as a `<repo>/unitap` submodule and run `<repo>/scripts/unitap`. Commands fail with `unitap_copy_mismatch` when the CLI is not the copy the project's Unity loads (`UNITAP_ALLOW_FOREIGN_CLI=1` overrides); `doctor` reports the CLI/package link, the pinned vs checked-out submodule commit and dirty state.
 - `clone create` checks out submodules (e.g. unitap itself) locally in the clone, and `clone remove` refuses to drop unpushed submodule work.
 - Run several Unity Editors side by side: `launch` no longer aborts when another project's Editor is running and only terminates this project's Editor (`--kill-all` is an explicit opt-in; `--kill-project-only` is now the default and kept for compatibility).

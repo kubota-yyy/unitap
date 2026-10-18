@@ -1,11 +1,14 @@
 """複数 Editor・複数セッション運用のためのコマンド (lease / editors / quit)。"""
 from __future__ import annotations
 
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .commands import print_unitap_response
 from .editor_lock import get_editor_operation_lock_snapshot
+from .execution_history import last_history_entry
 from .heartbeat import check_heartbeat_fresh, find_heartbeat
 from .identity import check_cli_identity, cli_package_root, package_git_state
 from .lease import (
@@ -17,7 +20,7 @@ from .lease import (
     resolve_session_owner,
 )
 from .project import is_unity_project_root
-from .unity import get_process_rss_mb, kill_unity_processes, list_unity_processes
+from .unity import UnityProcessListError, get_process_rss_mb, kill_unity_processes, list_unity_processes
 
 
 def register(subparsers, dispatch_table) -> None:
@@ -149,8 +152,47 @@ def collect_editors() -> list[dict]:
                     key: lease.get(key)
                     for key in ("owner", "note", "expiresAt", "remainingSeconds", "ownedByCaller")
                 }
+            last = last_history_entry(str(root))
+            if last:
+                entry["lastCommand"] = {
+                    "at": last.get("timestamp"),
+                    "command": last.get("command"),
+                    "session": last.get("session"),
+                }
+                idle = _minutes_since(last.get("timestamp"))
+                if idle is not None:
+                    entry["idleMinutes"] = idle
         editors.append(entry)
     return editors
+
+
+def _minutes_since(timestamp: str | None) -> int | None:
+    if not timestamp:
+        return None
+    try:
+        at = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - at).total_seconds() // 60))
+
+
+def _heartbeat_pid_alive(project_root: Path) -> int | None:
+    """ps に出ない時の保険。このプロジェクトの新しい heartbeat を書いた PID が生きていれば返す。"""
+    hb = find_heartbeat(str(project_root))
+    if not hb or not check_heartbeat_fresh(hb):
+        return None
+    pid = hb.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except OSError:
+        pass
+    return pid
 
 
 def do_editors(args, _port=None) -> None:
@@ -169,12 +211,29 @@ def do_quit(args, _port=None) -> None:
     if project_root is None:
         print_unitap_response(args, {"ok": False, "error": {"code": "project_not_found", "message": "Specify --project."}})
         return
-    running = list_unity_processes(project_root)
+    # 一覧を取れなかった時に「起動していない」と成功を返すと、Editor が開いたまま残る
+    try:
+        running = list_unity_processes(project_root, strict=True)
+    except UnityProcessListError as ex:
+        print_unitap_response(args, {"ok": False, "error": {"code": "process_list_failed", "message": str(ex)}})
+        return
     if not running:
+        hb_pid = _heartbeat_pid_alive(project_root)
+        if hb_pid is not None:
+            print_unitap_response(args, {"ok": False, "error": {
+                "code": "unity_quit_unconfirmed",
+                "message": "No Editor process matched this project, but its heartbeat is fresh and the PID is alive. Check `editors` and retry.",
+                "details": {"heartbeatPid": hb_pid},
+            }})
+            return
         print_unitap_response(args, {"ok": True, "result": {"quit": False, "message": "Unity is not running for this project."}})
         return
-    killed = kill_unity_processes(project_root)
-    remaining = list_unity_processes(project_root)
+    try:
+        killed = kill_unity_processes(project_root, strict=True)
+        remaining = list_unity_processes(project_root, strict=True)
+    except UnityProcessListError as ex:
+        print_unitap_response(args, {"ok": False, "error": {"code": "process_list_failed", "message": str(ex)}})
+        return
     if remaining:
         print_unitap_response(args, {"ok": False, "error": {
             "code": "unity_quit_failed",

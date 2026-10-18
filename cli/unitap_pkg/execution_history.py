@@ -409,6 +409,38 @@ def iter_jsonl_entries(path: Path | None):
         return
 
 
+_NON_EDITOR_COMMANDS = frozenset({"editors", "doctor", "commands", "describe"})
+
+
+def last_history_entry(project_path: str | None, tail_bytes: int = 65536) -> dict | None:
+    """Editor を最後に操作した履歴 (終わったセッションが Editor を開いたまま残していないかの判断用)。
+
+    一覧・診断は Editor を使っていないので数えない。
+    """
+    path = get_execution_history_path(project_path)
+    if path is None or not path.exists():
+        return None
+    try:
+        with path.open("rb") as fp:
+            fp.seek(0, os.SEEK_END)
+            size = fp.tell()
+            fp.seek(max(0, size - tail_bytes))
+            lines = fp.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict) and data.get("command") not in _NON_EDITOR_COMMANDS:
+            return data
+    return None
+
+
 def parse_since_to_epoch(raw: str | None) -> float | None:
     if raw is None:
         return None
