@@ -474,6 +474,36 @@ class QuitReliabilityTests(unittest.TestCase):
             self.assertEqual("compile_check", last["command"])
             self.assertEqual("claude:a", last["session"])
 
+    def test_parse_ps_elapsed_time(self):
+        self.assertEqual(65, unity.parse_elapsed_seconds("01:05"))
+        self.assertEqual(3 * 3600 + 5, unity.parse_elapsed_seconds("03:00:05"))
+        self.assertEqual(4 * 86400 + 13 * 3600 + 18 * 60 + 25, unity.parse_elapsed_seconds("04-13:18:25"))
+        self.assertIsNone(unity.parse_elapsed_seconds(""))
+
+
+class LeftOpenEditorTests(unittest.TestCase):
+    def _blockers(self, **entry):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = _make_project(Path(tmp) / "game")
+            return session_commands._left_open_blockers(entry, project)
+
+    def test_long_idle_editor_used_via_unitap_is_a_candidate(self):
+        self.assertEqual([], self._blockers(idleMinutes=600, uptimeMinutes=900))
+
+    def test_editor_opened_by_hand_after_last_command_is_kept(self):
+        self.assertIn("not_used_via_unitap_since_start", self._blockers(idleMinutes=900, uptimeMinutes=60))
+        self.assertIn("no_unitap_history", self._blockers(uptimeMinutes=6000))
+
+    def test_recent_lease_lock_compile_and_batch_are_kept(self):
+        self.assertIn("recently_used", self._blockers(idleMinutes=30, uptimeMinutes=900))
+        self.assertIn("lease", self._blockers(idleMinutes=600, uptimeMinutes=900, lease={"owner": "x"}))
+        self.assertIn("operation_lock", self._blockers(idleMinutes=600, uptimeMinutes=900, operationLock={"pid": 1}))
+        self.assertIn("compiling", self._blockers(idleMinutes=600, uptimeMinutes=900, heartbeat={"isCompiling": True}))
+        self.assertIn("batch_mode", self._blockers(idleMinutes=600, uptimeMinutes=900, batchMode=True))
+
+    def test_unknown_project_is_kept(self):
+        self.assertEqual(["unknown_project"], session_commands._left_open_blockers({}, None))
+
 
 if __name__ == "__main__":
     unittest.main()

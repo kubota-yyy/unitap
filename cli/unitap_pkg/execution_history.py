@@ -409,13 +409,13 @@ def iter_jsonl_entries(path: Path | None):
         return
 
 
-_NON_EDITOR_COMMANDS = frozenset({"editors", "doctor", "commands", "describe"})
+_NON_EDITOR_COMMANDS = frozenset({"editors", "doctor", "commands", "describe", "clone"})
 
 
 def last_history_entry(project_path: str | None, tail_bytes: int = 65536) -> dict | None:
     """Editor を最後に操作した履歴 (終わったセッションが Editor を開いたまま残していないかの判断用)。
 
-    一覧・診断は Editor を使っていないので数えない。
+    一覧・診断・clone 作成は Editor を使っていないので数えない。
     """
     path = get_execution_history_path(project_path)
     if path is None or not path.exists():

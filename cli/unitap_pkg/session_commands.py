@@ -20,7 +20,16 @@ from .lease import (
     resolve_session_owner,
 )
 from .project import is_unity_project_root
-from .unity import UnityProcessListError, get_process_rss_mb, kill_unity_processes, list_unity_processes
+from .unity import (
+    UnityProcessListError,
+    get_process_elapsed_seconds,
+    get_process_rss_mb,
+    kill_unity_processes,
+    list_unity_processes,
+)
+
+# 最後の unitap 操作からこの時間を過ぎた Editor を、終わったセッションの置き忘れ候補にする
+DEFAULT_STALE_EDITOR_MINUTES = 360
 
 
 def register(subparsers, dispatch_table) -> None:
@@ -126,10 +135,14 @@ def collect_editors() -> list[dict]:
     for proc in list_unity_processes():
         raw_path = proc.get("projectPath")
         root = Path(raw_path) if raw_path else None
+        pid = int(proc["pid"]) if proc.get("pid") else None
+        elapsed = get_process_elapsed_seconds(pid) if pid else None
         entry = {
             "pid": proc.get("pid"),
             "projectPath": raw_path,
-            "rssMb": get_process_rss_mb(int(proc["pid"])) if proc.get("pid") else None,
+            "rssMb": get_process_rss_mb(pid) if pid else None,
+            "uptimeMinutes": elapsed // 60 if elapsed is not None else None,
+            "batchMode": "-batchmode" in str(proc.get("command") or "").lower(),
         }
         if root is not None and is_unity_project_root(root):
             hb = find_heartbeat(str(root))
@@ -162,8 +175,49 @@ def collect_editors() -> list[dict]:
                 idle = _minutes_since(last.get("timestamp"))
                 if idle is not None:
                     entry["idleMinutes"] = idle
+        blockers = _left_open_blockers(entry, root)
+        entry["staleCandidate"] = not blockers
+        if blockers:
+            entry["notStaleBecause"] = blockers
         editors.append(entry)
     return editors
+
+
+def _stale_after_minutes() -> int:
+    try:
+        return max(1, int(os.environ.get("UNITAP_STALE_EDITOR_MINUTES", str(DEFAULT_STALE_EDITOR_MINUTES))))
+    except ValueError:
+        return DEFAULT_STALE_EDITOR_MINUTES
+
+
+def _left_open_blockers(entry: dict, root: Path | None) -> list[str]:
+    """終わったセッションの置き忘れとして閉じてよいかを、閉じてはいけない理由の一覧で返す (空なら候補)。
+
+    誤って閉じないよう、unitap で起動・操作された後に長く放置された対話 Editor だけを候補にする。
+    手で開いた Editor (起動後に unitap の操作が無い)、batchmode のビルド・テスト、lease・排他ロック中、
+    コンパイル中は候補にしない。
+    """
+    blockers: list[str] = []
+    if root is None or not is_unity_project_root(root):
+        return ["unknown_project"]
+    if entry.get("batchMode"):
+        blockers.append("batch_mode")
+    if entry.get("lease"):
+        blockers.append("lease")
+    if entry.get("operationLock"):
+        blockers.append("operation_lock")
+    if (entry.get("heartbeat") or {}).get("isCompiling"):
+        blockers.append("compiling")
+    idle = entry.get("idleMinutes")
+    uptime = entry.get("uptimeMinutes")
+    if idle is None:
+        blockers.append("no_unitap_history")
+    elif uptime is None or idle >= uptime:
+        # 最後の unitap 操作がこの Editor の起動より前 = 手で開いたか別の手段で起動した Editor
+        blockers.append("not_used_via_unitap_since_start")
+    elif idle < _stale_after_minutes():
+        blockers.append("recently_used")
+    return blockers
 
 
 def _minutes_since(timestamp: str | None) -> int | None:

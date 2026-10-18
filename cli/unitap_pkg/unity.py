@@ -671,3 +671,36 @@ def get_process_rss_mb(pid: int) -> float | None:
         return round(int(value) / 1024.0, 1)
     except ValueError:
         return None
+
+
+def parse_elapsed_seconds(value: str) -> int | None:
+    """ps の etime ([[dd-]hh:]mm:ss) を秒にする。"""
+    value = (value or "").strip()
+    if not value:
+        return None
+    days = 0
+    if "-" in value:
+        day_part, value = value.split("-", 1)
+        try:
+            days = int(day_part)
+        except ValueError:
+            return None
+    try:
+        fields = [int(x) for x in value.split(":")]
+    except ValueError:
+        return None
+    if not 1 <= len(fields) <= 3:
+        return None
+    seconds = 0
+    for field in fields:
+        seconds = seconds * 60 + field
+    return days * 86400 + seconds
+
+
+def get_process_elapsed_seconds(pid: int) -> int | None:
+    env = dict(os.environ, LC_ALL="C")
+    try:
+        result = subprocess.run(["ps", "-o", "etime=", "-p", str(pid)], capture_output=True, text=True, timeout=5, env=env)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return parse_elapsed_seconds(result.stdout)
