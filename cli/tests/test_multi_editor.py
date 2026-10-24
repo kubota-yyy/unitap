@@ -8,9 +8,9 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from unitap_pkg import clone, commands, editor_lock, execution_history, heartbeat, lease, session_commands, transport, unity
+from unitap_pkg import clone, commands, editor_lock, editor_slots, execution_history, heartbeat, lease, session_commands, transport, unity
 
 
 def _make_project(root: Path) -> Path:
@@ -24,7 +24,7 @@ def _launch_args(project: Path, **overrides) -> argparse.Namespace:
     values = dict(
         project=str(project), restart=False, force_restart=False, no_kill=False,
         kill_project_only=False, kill_all=False, no_wait=True, wait_timeout=10,
-        no_ignore_compiler_errors=False, json=True,
+        no_ignore_compiler_errors=False, json=True, no_wait_slot=True,
     )
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -87,8 +87,8 @@ class HeartbeatOwnershipTests(unittest.TestCase):
 
 
 class LaunchCoexistenceTests(unittest.TestCase):
-    def _run_launch(self, args, processes_by_project, *, hb=None, frozen=False):
-        def list_processes(project_root=None):
+    def _run_launch(self, args, processes_by_project, *, hb=None, frozen=False, free_percent=50, cleanup=None):
+        def list_processes(project_root=None, strict=False):
             if project_root is None:
                 return [p for items in processes_by_project.values() for p in items]
             return list(processes_by_project.get(str(project_root), []))
@@ -108,14 +108,20 @@ class LaunchCoexistenceTests(unittest.TestCase):
         with patch.object(commands, "get_unity_version", return_value="6000.3.24f1"), \
                 patch.object(commands, "get_unity_editor_path", return_value=Path("/bin/true")), \
                 patch.object(commands, "list_unity_processes", side_effect=list_processes), \
+                patch.object(editor_slots, "list_unity_processes", side_effect=list_processes), \
+                patch.object(editor_slots, "read_memory_status", return_value={
+                    "physicalBytes": 48 * 1024 ** 3, "freePercent": free_percent,
+                    "minFreePercent": 15, "swap": None, "errors": [],
+                }), \
+                patch.object(editor_slots, "_slot_directory", return_value=Path(args.project) / ".slots"), \
                 patch.object(commands, "kill_unity_processes", side_effect=fake_kill), \
-                patch.object(commands, "clean_recovery_files", return_value=[]), \
+                patch.object(commands, "clean_recovery_files", return_value=[], side_effect=cleanup), \
                 patch.object(commands, "find_heartbeat", return_value=hb), \
                 patch.object(commands, "check_heartbeat_fresh", return_value=bool(hb)), \
                 patch.object(commands, "check_heartbeat_frozen", return_value=frozen), \
                 patch.object(commands, "dismiss_safe_mode_dialog_async"), \
                 patch.object(commands.time, "sleep"), \
-                patch("subprocess.Popen") as popen, \
+                patch("subprocess.Popen", return_value=argparse.Namespace(pid=99999999)) as popen, \
                 redirect_stdout(stdout), redirect_stderr(io.StringIO()):
             try:
                 commands.do_launch(args)
@@ -183,6 +189,42 @@ class LaunchCoexistenceTests(unittest.TestCase):
             payload, killed, _, _ = self._run_launch(_launch_args(game, kill_all=True), procs)
         self.assertEqual([None], killed)
         self.assertEqual([11], payload["killedPids"])
+
+    def test_slot_limit_blocks_before_cleanup_kill_or_spawn(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"UNITAP_MAX_EDITORS": "1"}):
+            game = _make_project(Path(tmp).resolve() / "game")
+            other = str(Path(tmp) / "other")
+            procs = {other: [{"pid": 11, "projectPath": other, "command": "Unity"}]}
+            clean = Mock(return_value=[])
+            payload, killed, popen, code = self._run_launch(_launch_args(game, kill_all=True), procs, cleanup=clean)
+        self.assertEqual(1, code)
+        self.assertEqual("editor_slot_unavailable", payload["error"]["code"])
+        self.assertEqual(1, payload["error"]["details"]["currentCount"])
+        self.assertEqual([], killed)
+        popen.assert_not_called()
+        clean.assert_not_called()
+
+    def test_restart_excludes_own_editor_at_limit(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"UNITAP_MAX_EDITORS": "1"}):
+            game = _make_project(Path(tmp).resolve() / "game")
+            procs = {str(game): [{"pid": 22, "projectPath": str(game), "command": "Unity"}]}
+            payload, killed, popen, code = self._run_launch(_launch_args(game, restart=True), procs)
+        self.assertEqual(0, code)
+        self.assertEqual([game], killed)
+        self.assertTrue(payload["launched"])
+        popen.assert_called_once()
+
+    def test_memory_pressure_blocks_restart_without_killing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            game = _make_project(Path(tmp).resolve() / "game")
+            procs = {str(game): [{"pid": 22, "projectPath": str(game), "command": "Unity"}]}
+            payload, killed, popen, code = self._run_launch(
+                _launch_args(game, restart=True), procs, free_percent=14,
+            )
+        self.assertEqual(1, code)
+        self.assertEqual(14, payload["error"]["details"]["memory"]["freePercent"])
+        self.assertEqual([], killed)
+        popen.assert_not_called()
 
 
 class LeaseTests(unittest.TestCase):

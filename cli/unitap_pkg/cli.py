@@ -526,6 +526,8 @@ def build_parser():
     )
     p_launch.add_argument("--no-wait", action="store_true", help="Don't wait for startup confirmation")
     p_launch.add_argument("--wait-timeout", type=int, default=180, help="Startup wait timeout in seconds")
+    p_launch.add_argument("--wait-slot-timeout", type=float, default=1800, help="Wait for a machine-wide Editor/memory slot in seconds (default: 1800)")
+    p_launch.add_argument("--no-wait-slot", action="store_true", help="Fail immediately if the Editor count or memory guard blocks startup")
 
     # --- Dispatch table ---
     dispatch_table = {

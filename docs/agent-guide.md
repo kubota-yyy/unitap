@@ -109,6 +109,8 @@ unitap --json lease status
 
 **並行に使う（clone）**: セッションごとに作業用プロジェクトを作り、別 Editor で開く。git リポジトリでは worktree、Library は APFS clone（容量をほぼ使わず数秒）で複製するため、初回起動の再インポートをほぼ省ける。複製先は元（worktree ではリポジトリ）の兄弟 `<name>--<label>` に置き、`file:../../pkg` の相対参照を保つ。
 
+clone の並行起動も Mac 全体の Editor 上限に従う。`launch` は物理メモリ GiB / 8 の切り捨て（最低 1、`UNITAP_MAX_EDITORS` の正整数で上書き）以上、または `memory_pressure` の free が 15% 未満なら、既定で最大 1800 秒待つ（理由は stderr に 1 分ごと）。`--wait-slot-timeout <秒>` で待機時間を指定し、`--no-wait-slot` なら直ちに `editor_slot_unavailable` を返す。`--no-wait` は起動確認だけを省略し、空き待ちは省略しない。AssetImportWorker は数えず、再起動する同一プロジェクトの Editor は枠の計算から除く。メモリ取得失敗時も起動を待つ。swap 使用量は診断用に表示し、使用量だけでは起動を止めない。`editors` と `doctor` の `editorSlots` で上限・現在数・メモリを確認できる。待たされても他の Editor を勝手に閉じない。
+
 ```sh
 unitap --json clone create --name qa-shop                 # HEAD の worktree（detached）
 unitap --json clone create --name fix-a --branch fix/a    # ブランチを作る

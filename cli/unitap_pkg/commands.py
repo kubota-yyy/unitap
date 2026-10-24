@@ -13,6 +13,7 @@ from .constants import (
 )
 from . import qa_repeat
 from .editor_lock import enrich_diagnose_result_with_editor_lock
+from .editor_slots import DEFAULT_WAIT_SLOT_TIMEOUT, EditorSlotUnavailable, editor_slot
 from .lease import resolve_session_owner
 from .editor_log import find_project_root, read_compile_errors, summarize_project_editor_activity
 from .heartbeat import check_heartbeat_fresh, check_heartbeat_frozen, find_heartbeat
@@ -143,9 +144,75 @@ def _build_unavailability_payload(project_path: str | None, process_running: boo
     return payload
 
 
+def _launch_editor_process(args, project_root, version, editor_path, running_same_project, running_other_projects, kill_all, emit, slot):
+    import subprocess
+
+    # 3. バックアップ削除（Recovery Scene Backups ダイアログ防止）
+    removed = clean_recovery_files(project_root)
+
+    # 4. 既存プロセスを kill
+    # 既定では対象プロジェクトの Editor だけを終了する。別プロジェクトの Editor は
+    # 他セッションが使っている可能性があるため、--kill-all を明示した時だけ終了する。
+    killed: list[int] = []
+    if not args.no_kill and (running_same_project or (kill_all and running_other_projects)):
+        killed = kill_unity_processes(None if kill_all else project_root)
+        if killed:
+            print(f"Killed Unity processes: {killed}", file=sys.stderr)
+            time.sleep(2)
+        still_running = list_unity_processes(None if kill_all else project_root)
+        if still_running:
+            emit({
+                "ok": False,
+                "error": {
+                    "code": "unity_kill_failed",
+                    "message": "Failed to terminate existing Unity process. Launch aborted to avoid multiple instances of this project.",
+                },
+                "projectPath": str(project_root),
+                "runningProcesses": _format_processes(still_running),
+            }, exit_code=1)
+
+    # 5. kill 後にも再掃除（ロック解放後に残るバックアップ対策）
+    for p in clean_recovery_files(project_root):
+        if p not in removed:
+            removed.append(p)
+    if removed:
+        print(f"Cleaned recovery files: {', '.join(removed)}", file=sys.stderr)
+
+    # 6. 古い heartbeat を削除
+    old_hb_path = project_root / "Library" / "Unitap" / ".heartbeat.json"
+    if old_hb_path.exists():
+        try:
+            old_hb_path.unlink()
+        except OSError:
+            pass
+
+    # 7. Unity 起動
+    # Unity 6 では -ignoreCompilerErrors だけでは "Enter Safe Mode?" を抑制できない
+    # ケースが残るため、デフォルトで CLI フラグを付与しつつ AppleScript dismisser も併用する。
+    # オプトアウトしたい場合は --no-ignore-compiler-errors を指定する。
+    ignore_compiler_errors = not getattr(args, "no_ignore_compiler_errors", False)
+    expected_build_target = get_expected_build_target(project_root)
+    cmd = build_unity_launch_command(
+        editor_path,
+        project_root,
+        ignore_compiler_errors=ignore_compiler_errors,
+        build_target=expected_build_target,
+    )
+    print(f"Launching Unity {version}...", file=sys.stderr)
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=build_unity_launch_environment(),
+        start_new_session=True,
+    )
+
+    slot.started(process.pid)
+    return killed, expected_build_target
+
+
 def do_launch(args) -> None:
     """Unity Editor を起動する"""
-    import subprocess
 
     def emit(payload: dict, *, exit_code: int | None = None) -> None:
         setattr(args, "_last_unitap_response", payload)
@@ -247,66 +314,21 @@ def do_launch(args) -> None:
             "runningProcesses": _format_processes(running_same_project),
         }, exit_code=1)
 
-    # 3. バックアップ削除（Recovery Scene Backups ダイアログ防止）
-    removed = clean_recovery_files(project_root)
+    # 再起動時も、既存 Editor の終了・掃除より先に起動枠を確保する。
+    try:
+        with editor_slot(
+            project_root,
+            wait=not getattr(args, "no_wait_slot", False),
+            timeout_s=getattr(args, "wait_slot_timeout", DEFAULT_WAIT_SLOT_TIMEOUT),
+        ) as slot:
+            killed, expected_build_target = _launch_editor_process(
+                args, project_root, version, editor_path, running_same_project,
+                running_other_projects, kill_all, emit, slot,
+            )
+    except EditorSlotUnavailable as ex:
+        emit({"ok": False, "error": {"code": ex.code, "message": str(ex), "details": ex.details}}, exit_code=1)
 
-    # 4. 既存プロセスを kill
-    # 既定では対象プロジェクトの Editor だけを終了する。別プロジェクトの Editor は
-    # 他セッションが使っている可能性があるため、--kill-all を明示した時だけ終了する。
-    killed: list[int] = []
-    if not args.no_kill and (running_same_project or (kill_all and running_other_projects)):
-        killed = kill_unity_processes(None if kill_all else project_root)
-        if killed:
-            print(f"Killed Unity processes: {killed}", file=sys.stderr)
-            time.sleep(2)
-        still_running = list_unity_processes(None if kill_all else project_root)
-        if still_running:
-            emit({
-                "ok": False,
-                "error": {
-                    "code": "unity_kill_failed",
-                    "message": "Failed to terminate existing Unity process. Launch aborted to avoid multiple instances of this project.",
-                },
-                "projectPath": str(project_root),
-                "runningProcesses": _format_processes(still_running),
-            }, exit_code=1)
-
-    # 5. kill 後にも再掃除（ロック解放後に残るバックアップ対策）
-    for p in clean_recovery_files(project_root):
-        if p not in removed:
-            removed.append(p)
-    if removed:
-        print(f"Cleaned recovery files: {', '.join(removed)}", file=sys.stderr)
-
-    # 6. 古い heartbeat を削除
-    old_hb_path = project_root / "Library" / "Unitap" / ".heartbeat.json"
-    if old_hb_path.exists():
-        try:
-            old_hb_path.unlink()
-        except OSError:
-            pass
-
-    # 7. Unity 起動
-    # Unity 6 では -ignoreCompilerErrors だけでは "Enter Safe Mode?" を抑制できない
-    # ケースが残るため、デフォルトで CLI フラグを付与しつつ AppleScript dismisser も併用する。
-    # オプトアウトしたい場合は --no-ignore-compiler-errors を指定する。
     ignore_compiler_errors = not getattr(args, "no_ignore_compiler_errors", False)
-    expected_build_target = get_expected_build_target(project_root)
-    cmd = build_unity_launch_command(
-        editor_path,
-        project_root,
-        ignore_compiler_errors=ignore_compiler_errors,
-        build_target=expected_build_target,
-    )
-    print(f"Launching Unity {version}...", file=sys.stderr)
-    subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=build_unity_launch_environment(),
-        start_new_session=True,
-    )
-
     # 7.5 起動時ダイアログ自動処理 (macOS / Accessibility 権限が必要)
     if ignore_compiler_errors:
         dismiss_safe_mode_dialog_async(timeout_seconds=120)

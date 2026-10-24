@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .commands import print_unitap_response
 from .editor_lock import get_editor_operation_lock_snapshot
+from .editor_slots import editor_slot_snapshot
 from .execution_history import last_history_entry
 from .heartbeat import check_heartbeat_fresh, find_heartbeat
 from .identity import check_cli_identity, cli_package_root, package_git_state
@@ -257,6 +258,7 @@ def do_editors(args, _port=None) -> None:
         "totalRssMb": round(total_rss, 1),
         "session": resolve_session_owner(),
         "editors": editors,
+        "editorSlots": editor_slot_snapshot(),
     }})
 
 
@@ -305,6 +307,11 @@ def do_doctor(args, _port=None) -> None:
     package = package_git_state(cli_package_root())
     problems: list[str] = []
     warnings: list[str] = []
+    slots = editor_slot_snapshot()
+    if slots["currentCount"] > slots["maxEditors"]:
+        warnings.append(f"Editor limit exceeded ({slots['currentCount']}/{slots['maxEditors']}).")
+    # At the limit is healthy for existing Editors, but another launch will wait.
+    warnings.extend(reason for reason in slots["reasons"] if not reason.startswith("Editor limit reached"))
     if project_root is None:
         warnings.append("No Unity project resolved; pass --project to check the project link.")
     elif identity.get("projectPackage") is None:
@@ -337,6 +344,7 @@ def do_doctor(args, _port=None) -> None:
             "identity": identity,
             "package": package,
             "heartbeat": heartbeat,
+            "editorSlots": slots,
             "python": sys.version.split()[0],
         },
     }
