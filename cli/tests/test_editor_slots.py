@@ -40,7 +40,7 @@ class EditorSlotTests(unittest.TestCase):
         self.clock[0] += seconds
 
     def test_default_limit_and_override(self):
-        for gib, expected in ((4, 1), (16, 2), (48, 6), (63, 7)):
+        for gib, expected in ((4, 1), (16, 1), (48, 4), (128, 10)):
             with self.subTest(gib=gib):
                 self.memory.return_value = memory(gib)
                 self.assertEqual(expected, slots.editor_slot_snapshot()["maxEditors"])
@@ -155,7 +155,7 @@ class EditorSlotTests(unittest.TestCase):
         args = argparse.Namespace(json=True, project=None)
         with patch.object(session_commands, "collect_editors", return_value=[]), redirect_stdout(io.StringIO()) as out:
             session_commands.do_editors(args)
-        self.assertEqual(6, json.loads(out.getvalue())["result"]["editorSlots"]["maxEditors"])
+        self.assertEqual(4, json.loads(out.getvalue())["result"]["editorSlots"]["maxEditors"])
         with patch.object(session_commands, "check_cli_identity", return_value={}), \
                 patch.object(session_commands, "package_git_state", return_value={}), redirect_stdout(io.StringIO()) as out:
             session_commands.do_doctor(args)

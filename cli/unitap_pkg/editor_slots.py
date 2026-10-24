@@ -79,7 +79,8 @@ def _pending_editors(processes: list[dict]) -> list[dict]:
 
 def editor_slot_snapshot(project_root: Path | None = None) -> dict:
     memory = read_memory_status()
-    default_limit = max(1, int(memory["physicalBytes"] or 0) // (8 * 1024 ** 3))
+    # 1 Editor は Import Worker 込みで 4〜5GB 使い、48GB で6つ並べると swap が 40GB を超えた（2026-10-24）
+    default_limit = max(1, int(memory["physicalBytes"] or 0) // (12 * 1024 ** 3))
     reasons = []
     limit = default_limit
     override = os.environ.get("UNITAP_MAX_EDITORS")
