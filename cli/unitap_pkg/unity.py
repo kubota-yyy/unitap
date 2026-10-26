@@ -2,9 +2,11 @@ import os
 import platform
 import json
 import re
+import signal
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -65,14 +67,41 @@ on isSafeModeDialog(dialogText, buttonNames)
 end isSafeModeDialog
 '''
 
-_STARTUP_DIALOG_DISMISS_SCRIPT = (
-    f"-- {_STARTUP_DIALOG_DISMISS_MARKER}\n" + _SAFE_MODE_DIALOG_MATCHER + r'''
+_KNOWN_DIALOG_HANDLERS = _SAFE_MODE_DIALOG_MATCHER + r'''
+on jsonString(valueText)
+    set escapedText to ""
+    repeat with ch in characters of (valueText as text)
+        set c to ch as text
+        if c is "\"" or c is "\\" then
+            set escapedText to escapedText & "\\" & c
+        else if c is linefeed then
+            set escapedText to escapedText & "\\n"
+        else if c is return then
+            set escapedText to escapedText & "\\r"
+        else if c is tab then
+            set escapedText to escapedText & "\\t"
+        else if (id of c) < 32 then
+            set escapedText to escapedText & " "
+        else
+            set escapedText to escapedText & c
+        end if
+    end repeat
+    return "\"" & escapedText & "\""
+end jsonString
+
+on dialogRecord(kind, editorPid, dialogText, buttonName, errorText)
+    return "{" & "\"status\":" & my jsonString(kind) & ",\"pid\":" & editorPid & ",\"text\":" & my jsonString(dialogText) & ",\"button\":" & my jsonString(buttonName) & ",\"message\":" & my jsonString(errorText) & "}" & linefeed
+end dialogRecord
+
 on clickButton(editorPid, j, buttonName)
-    tell application "System Events" to click button buttonName of window j of (first process whose unix id is editorPid)
+    with timeout of 5 seconds
+        tell application "System Events" to click button buttonName of window j of (first process whose unix id is editorPid)
+    end timeout
 end clickButton
 
 on handleWindow(editorPid, j)
-    tell application "System Events"
+    with timeout of 5 seconds
+      tell application "System Events"
         set wName to name of window j of (first process whose unix id is editorPid)
         set buttonNames to {}
         try
@@ -82,7 +111,8 @@ on handleWindow(editorPid, j)
         try
             set textValues to value of every static text of window j of (first process whose unix id is editorPid)
         end try
-    end tell
+      end tell
+    end timeout
     if wName is missing value then set wName to ""
     set dialogText to wName
     repeat with textValue in textValues
@@ -90,32 +120,66 @@ on handleWindow(editorPid, j)
             set dialogText to dialogText & " " & (textValue as text)
         end try
     end repeat
+    set buttonName to ""
     if my isSafeModeDialog(dialogText, buttonNames) then
-        try
-            my clickButton(editorPid, j, "Ignore")
-        end try
+        set buttonName to "Ignore"
+        set dialogText to "Enter Safe Mode?"
     end if
-    if wName contains "Corrupted Library Detected" then
-        try
-            my clickButton(editorPid, j, "Rebuild Library")
-        end try
+    if wName contains "Corrupted Library Detected" and buttonNames contains "Rebuild Library" then
+        set buttonName to "Rebuild Library"
     end if
     if buttonNames contains "Reload" and buttonNames contains "Ignore" then
         if dialogText contains "open scene" or dialogText contains "open scene(s)" or dialogText contains "changed on disk" then
-            try
-                my clickButton(editorPid, j, "Reload")
-            end try
+            set buttonName to "Reload"
         end if
     end if
     if buttonNames contains "Cancel" and buttonNames contains "Open manual" then
         if dialogText contains "UI Toolkit Particles" then
-            try
-                my clickButton(editorPid, j, "Cancel")
-            end try
+            set buttonName to "Cancel"
         end if
     end if
+    if buttonName is not "" then
+        try
+            my clickButton(editorPid, j, buttonName)
+            return my dialogRecord("dismissed", editorPid, dialogText, buttonName, "")
+        on error errorText
+            return my dialogRecord("blocked", editorPid, dialogText, buttonName, errorText)
+        end try
+    end if
+    if (count of buttonNames) > 0 then return my dialogRecord("remaining", editorPid, dialogText, "", "Unrecognized window; no button clicked")
+    return ""
 end handleWindow
 
+on scanEditors()
+    set records to ""
+    with timeout of 5 seconds
+        tell application "System Events" to set unityPids to unix id of (every process whose name is "Unity")
+    end timeout
+    repeat with pidItem in unityPids
+        set editorPid to pidItem as integer
+        try
+            with timeout of 5 seconds
+                tell application "System Events" to set winCount to count of windows of (first process whose unix id is editorPid)
+            end timeout
+            repeat with j from winCount to 1 by -1
+                try
+                    set records to records & my handleWindow(editorPid, j)
+                end try
+            end repeat
+        end try
+    end repeat
+    return records
+end scanEditors
+'''
+
+_DISMISS_KNOWN_DIALOGS_SCRIPT = _KNOWN_DIALOG_HANDLERS + r'''
+on run argv
+    return my scanEditors()
+end run
+'''
+
+_STARTUP_DIALOG_DISMISS_SCRIPT = (
+    f"-- {_STARTUP_DIALOG_DISMISS_MARKER}\n" + _KNOWN_DIALOG_HANDLERS + r'''
 on run argv
     set timeoutSeconds to 90
     if (count of argv) is greater than 0 then
@@ -127,21 +191,10 @@ on run argv
     set deadline to (current date) + timeoutSeconds
     repeat while (current date) < deadline
         try
-            -- Every Editor is a process named "Unity". A stored reference to one of them
-            -- ("application process "Unity"") resolves to the first Unity, so a dialog in any
-            -- other Editor was never seen. Address each Editor by unix id, inline, every time.
-            tell application "System Events" to set unityPids to unix id of (every process whose name is "Unity")
-            repeat with pidItem in unityPids
-                set editorPid to pidItem as integer
-                try
-                    tell application "System Events" to set winCount to count of windows of (first process whose unix id is editorPid)
-                    repeat with j from 1 to winCount
-                        try
-                            my handleWindow(editorPid, j)
-                        end try
-                    end repeat
-                end try
-            end repeat
+            with timeout of 5 seconds
+                do shell script "touch " & quoted form of (item 2 of argv)
+            end timeout
+            my scanEditors()
         end try
         delay 0.5
     end repeat
@@ -149,18 +202,36 @@ end run
 ''')
 
 
+def _dialog_watch_beat_path() -> Path:
+    return Path(tempfile.gettempdir()) / f"unitap-dialog-watch-{os.getuid()}.beat"
+
+
 def _startup_dialog_dismisser_running() -> bool:
-    """既に起動済みのダイアログ処理 osascript があるか (pgrep -f のマーカー一致で判定)."""
+    """生存だけでなく巡回の進行を確認し、停止した旧版の監視も置き換える。"""
     try:
         result = subprocess.run(
-            ["pgrep", "-f", _STARTUP_DIALOG_DISMISS_MARKER],
-            stdout=subprocess.DEVNULL,
+            ["pgrep", "-u", str(os.getuid()), "-f", _STARTUP_DIALOG_DISMISS_MARKER],
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            text=True,
             timeout=5,
         )
     except (subprocess.TimeoutExpired, OSError):
         return False
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    try:
+        if time.time() - _dialog_watch_beat_path().stat().st_mtime <= 20:
+            return True
+    except OSError:
+        pass
+    for value in result.stdout.split():
+        if value.isdigit() and int(value) != os.getpid():
+            try:
+                os.kill(int(value), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+    return False
 
 
 def dismiss_startup_dialogs_async(timeout_seconds: int = 90) -> None:
@@ -178,18 +249,101 @@ def dismiss_startup_dialogs_async(timeout_seconds: int = 90) -> None:
     # unitap は agent から短時間に何度も呼ばれる。呼ばれるたびに最長 30 分生きる
     # osascript を切り離すと数千個溜まって System Events とメモリを食い潰すので、
     # 既存ウォッチャーが生きている間はスキップする。
-    if _startup_dialog_dismisser_running():
-        return
     try:
-        subprocess.Popen(
-            ["osascript", "-e", _STARTUP_DIALOG_DISMISS_SCRIPT, "--", str(int(timeout_seconds))],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        import fcntl
+        beat_path = _dialog_watch_beat_path()
+        # 短命のCLIが同時に来ても、再起動と起動直後の猶予を1か所で管理する。
+        with beat_path.with_suffix(".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if _startup_dialog_dismisser_running():
+                return
+            beat_path.touch()
+            subprocess.Popen(
+                ["osascript", "-e", _STARTUP_DIALOG_DISMISS_SCRIPT, "--", str(int(timeout_seconds)), str(beat_path)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
     except OSError:
         # osascript 不在等は致命ではないので無視する
         pass
+
+
+def dismiss_known_dialogs_once() -> dict:
+    """全Editorを1回だけ走査する。既知のボタン以外は押さない。"""
+    result = {"dismissedDialogs": [], "remainingDialogs": []}
+    if platform.system().lower() != "darwin":
+        return result
+    try:
+        completed = subprocess.run(
+            ["osascript", "-e", _DISMISS_KNOWN_DIALOGS_SCRIPT],
+            capture_output=True, text=True, timeout=15,
+        )
+        if completed.returncode:
+            raise ValueError(completed.stderr.strip() or f"osascript exited {completed.returncode}")
+        for line in completed.stdout.splitlines():
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record["status"] == "dismissed":
+                result["dismissedDialogs"].append(f"{record['text']} -> {record['button']}")
+            else:
+                result["remainingDialogs"].append(record)
+        if any(item["status"] == "blocked" for item in result["remainingDialogs"]):
+            result["ok"] = False
+            result["error"] = {
+                "code": "editor_dialog_blocking",
+                "message": "A known Editor dialog could not be clicked; stopped waiting.",
+                "details": {"dialogs": result["remainingDialogs"]},
+            }
+        else:
+            result["ok"] = True
+        if "Enter Safe Mode? -> Ignore" in result["dismissedDialogs"]:
+            result["hint"] = "コンパイルエラーがある。compile_check / read_console で直す。"
+    except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as ex:
+        result["scanError"] = str(ex)
+        result["ok"] = False
+        result["error"] = {"code": "editor_dialog_scan_failed", "message": str(ex)}
+    return result
+
+
+class EditorDialogBlocking(Exception):
+    def __init__(self, args, response):
+        self.args_namespace = args
+        self.response = response
+        super().__init__(response["error"]["message"])
+
+
+def check_known_dialogs(args) -> None:
+    """待機ループから5秒ごとに同期確認し、結果をコマンドのJSONへ引き継ぐ。"""
+    if getattr(args, "no_ignore_compiler_errors", False):
+        return
+    now = time.monotonic()
+    last = getattr(args, "_dialog_checked_at", None)
+    if last is not None and now - last < 5:
+        return
+    result = dismiss_known_dialogs_once()
+    args._dialog_checked_at = time.monotonic()
+    previous = getattr(args, "_dialog_result", {})
+    result["dismissedDialogs"] = list(dict.fromkeys(
+        previous.get("dismissedDialogs", []) + result.get("dismissedDialogs", [])))
+    if previous.get("hint"):
+        result.setdefault("hint", previous["hint"])
+    args._dialog_result = result
+    if result.get("error", {}).get("code") == "editor_dialog_blocking":
+        raise EditorDialogBlocking(args, merge_dialog_result(args, result))
+
+
+def merge_dialog_result(args, response: dict) -> dict:
+    dialogs = getattr(args, "_dialog_result", {})
+    metadata = {key: dialogs[key] for key in ("dismissedDialogs", "hint", "scanError") if dialogs.get(key)}
+    if not metadata:
+        return response
+    response = dict(response)
+    response.update(metadata)
+    if isinstance(response.get("result"), dict):
+        response["result"] = {**response["result"], **metadata}
+    return response
 
 
 def dismiss_safe_mode_dialog_async(timeout_seconds: int = 90) -> None:

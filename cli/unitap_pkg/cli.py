@@ -29,7 +29,11 @@ from .heartbeat import check_heartbeat_fresh, find_heartbeat
 from .project import ProjectResolutionError, resolve_project_root
 from .runtime_diagnostics import classify_unity_unavailability
 from .transport import wait_for_connection
-from .unity import dismiss_startup_dialogs_async, focus_unity_editor, is_unity_process_running
+from .unity import (
+    EditorDialogBlocking, check_known_dialogs, dismiss_known_dialogs_once,
+    dismiss_startup_dialogs_async, focus_unity_editor, is_unity_process_running,
+    merge_dialog_result,
+)
 from .execution_history import record_execution_history
 from .unicli_bridge import prepare_unicli, register as register_unicli
 from .discovery import register as register_discovery
@@ -55,6 +59,7 @@ from .commands import (
     do_wait_fsm,
     do_wait_idle,
     do_wait_result,
+    print_unitap_response,
 )
 
 # Extension point: loaded if unitap_ext package is available on sys.path
@@ -77,6 +82,7 @@ def _print_cli_error(args, code: str, message: str, details: dict | None = None)
     }
     if details:
         error_payload["error"]["details"] = details
+    error_payload = merge_dialog_result(args, error_payload)
     setattr(args, "_last_unitap_response", error_payload)
     if args.json:
         print(json.dumps(error_payload, indent=2, ensure_ascii=False))
@@ -210,7 +216,7 @@ _PROJECT_OPTIONAL_COMMANDS = ("commands", "describe", "editors", "doctor")
 _IDENTITY_CHECK_EXEMPT_COMMANDS = ("commands", "describe", "editors", "doctor")
 # Unity のダイアログ監視 (osascript) を起動しないコマンド
 _NO_DIALOG_WATCH_COMMANDS = (
-    "focus", "unicli", "exec", "eval", "commands", "describe", "editors", "lease", "clone", "quit", "doctor",
+    "focus", "unicli", "exec", "eval", "commands", "describe", "editors", "lease", "clone", "quit", "doctor", "dismiss_dialogs",
 )
 
 
@@ -529,6 +535,8 @@ def build_parser():
     p_launch.add_argument("--wait-slot-timeout", type=float, default=1800, help="Wait for a machine-wide Editor/memory slot in seconds (default: 1800)")
     p_launch.add_argument("--no-wait-slot", action="store_true", help="Fail immediately if the Editor count or memory guard blocks startup")
 
+    subparsers.add_parser("dismiss_dialogs", help="Scan all Editors once and dismiss known native dialogs (macOS)")
+
     # --- Dispatch table ---
     dispatch_table = {
         "launch": lambda args, port: do_launch(args),
@@ -558,11 +566,30 @@ def build_parser():
 
 
 def main():
+    try:
+        _main()
+    except EditorDialogBlocking as ex:
+        args = ex.args_namespace
+        setattr(args, "_command_exit_code", 1)
+        setattr(args, "_last_unitap_response", ex.response)
+        print(json.dumps(ex.response, indent=2, ensure_ascii=False))
+        _record_command_history(args, getattr(args, "_command_started_at", time.time()))
+        sys.exit(1)
+
+
+def _main():
     parser, dispatch_table = build_parser()
     args = parser.parse_args()
     setattr(args, "_last_unitap_response", None)
     setattr(args, "_command_exit_code", None)
     command_started_at = time.time()
+    args._command_started_at = command_started_at
+
+    if args.command == "dismiss_dialogs":
+        result = dismiss_known_dialogs_once()
+        print_unitap_response(args, {"ok": result.get("ok", True), "result": result,
+                                     **({"error": result["error"]} if "error" in result else {})})
+        return
 
     if args.command == "tool_exec":
         if getattr(args, "history", None) is False:
@@ -812,6 +839,8 @@ def main():
 
     # Heartbeat check
     heartbeat = find_heartbeat(args.project)
+    if not heartbeat or not check_heartbeat_fresh(heartbeat) or heartbeat.get("isCompiling"):
+        check_known_dialogs(args)
     project_root = find_project_root(args.project)
 
     if not heartbeat:
@@ -826,6 +855,7 @@ def main():
                 args.project,
                 max_retries=LIVENESS_RECONNECT_RETRY_MAX,
                 require_tcp=True,
+                on_dialog_check=lambda: check_known_dialogs(args),
             )
             _append_wait_meta(
                 args,
@@ -855,6 +885,7 @@ def main():
             if error_entries:
                 heartbeat["compileErrors"] = error_entries
                 heartbeat["compileErrorCount"] = len(error_entries)
+        heartbeat = merge_dialog_result(args, heartbeat)
         setattr(args, "_last_unitap_response", {"ok": True, "result": heartbeat})
         setattr(args, "_command_exit_code", 0 if fresh else 1)
         print(json.dumps(heartbeat, indent=2))
@@ -928,6 +959,7 @@ def main():
                 max_retries=max_retries,
                 require_tcp=True,
                 on_wait_retry=wait_retry_hook,
+                on_dialog_check=lambda: check_known_dialogs(args),
             )
             _append_wait_meta(
                 args,

@@ -31,6 +31,7 @@ from .unity import (
     build_unity_launch_environment,
     build_unity_launch_command,
     clean_recovery_files,
+    check_known_dialogs,
     dismiss_safe_mode_dialog_async,
     focus_unity_editor,
     get_unity_editor_path,
@@ -40,6 +41,7 @@ from .unity import (
     kill_unity_processes,
     list_unity_processes,
     list_installed_unity_versions,
+    merge_dialog_result,
 )
 
 
@@ -56,6 +58,7 @@ def send_unitap_sync(args, port: int, command: str, params: dict, timeout_ms: in
 
 
 def print_unitap_response(args, resp: dict) -> None:
+    resp = merge_dialog_result(args, resp)
     setattr(args, "_last_unitap_response", resp)
     if resp.get("ok"):
         result = resp.get("result", {})
@@ -215,6 +218,7 @@ def do_launch(args) -> None:
     """Unity Editor を起動する"""
 
     def emit(payload: dict, *, exit_code: int | None = None) -> None:
+        payload = merge_dialog_result(args, payload)
         setattr(args, "_last_unitap_response", payload)
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         if exit_code is not None:
@@ -277,7 +281,8 @@ def do_launch(args) -> None:
         if not connected and not args.no_wait:
             timeout_s = args.wait_timeout
             max_retries = max(timeout_s // CONNECTION_RETRY_INTERVAL, 1)
-            hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True)
+            hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True,
+                                     on_dialog_check=lambda: check_known_dialogs(args))
             connected = bool(hb)
 
         emit(_already_running_payload(
@@ -349,7 +354,8 @@ def do_launch(args) -> None:
     timeout_s = args.wait_timeout
     print(f"Waiting for Unity to start (timeout: {timeout_s}s)...", file=sys.stderr)
     max_retries = max(timeout_s // CONNECTION_RETRY_INTERVAL, 1)
-    hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True)
+    hb = wait_for_connection(args.project, max_retries=max_retries, require_tcp=True,
+                             on_dialog_check=lambda: check_known_dialogs(args))
 
     if hb:
         emit(merge_transport_fields({
@@ -1116,6 +1122,7 @@ def do_compile_check(args, port: int) -> None:
             args.timeout,
             args.project,
             stop_foreign_play=bool(getattr(args, "stop_foreign_play", False)),
+            on_dialog_check=lambda: check_known_dialogs(args),
         )
         if not resp.get("ok"):
             print_unitap_response(args, resp)

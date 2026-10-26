@@ -20,7 +20,7 @@ from .constants import (
 )
 from .editor_log import find_project_root, parse_project_editor_log_snapshot, read_compile_errors
 from .heartbeat import check_heartbeat_fresh, find_heartbeat
-from .unity import is_unity_process_running
+from .unity import EditorDialogBlocking, is_unity_process_running
 
 
 def send_request(host: str, port: int, request: dict, timeout_s: float = 30) -> dict:
@@ -223,6 +223,7 @@ def wait_for_connection(
     max_retries: int = CONNECTION_RETRY_MAX,
     require_tcp: bool = False,
     on_wait_retry=None,
+    on_dialog_check=None,
 ) -> dict | None:
     """heartbeat が fresh になるまで待機し、接続情報を返す。
     require_tcp=True の場合、現在の transport で request/response が確認できるまで待機する。"""
@@ -231,6 +232,8 @@ def wait_for_connection(
         if i > 0:
             time.sleep(CONNECTION_RETRY_INTERVAL)
 
+        if on_dialog_check:
+            on_dialog_check()
         hb = find_heartbeat(project_path)
         if hb:
             ever_seen_heartbeat = True
@@ -286,11 +289,14 @@ def send_with_retry(
     timeout_s: float,
     project_path: str | None,
     exit_on_error: bool = True,
+    on_dialog_check=None,
 ) -> dict:
     """現在の transport で送信。Connection refused/closed 時にドメインリロード待ちでリトライ"""
     current_port = port
 
     for attempt in range(3):  # 復帰後の再接続断に備えて最大3回リトライ
+        if on_dialog_check:
+            on_dialog_check()
         try:
             return send_request_to_current_transport(
                 project_path,
@@ -308,6 +314,7 @@ def send_with_retry(
                         project_path,
                         max_retries=LIVENESS_RECONNECT_RETRY_MAX,
                         require_tcp=True,
+                        **({"on_dialog_check": on_dialog_check} if on_dialog_check else {}),
                     )
                     if recovered_hb:
                         if recovered_hb.get("port"):
@@ -353,7 +360,8 @@ def send_with_retry(
                 reconnect_max_retries = max(reconnect_max_retries, int(env_retries))
             except ValueError:
                 pass
-        hb = wait_for_connection(project_path, max_retries=reconnect_max_retries, require_tcp=True)
+        hb = wait_for_connection(project_path, max_retries=reconnect_max_retries, require_tcp=True,
+                                 **({"on_dialog_check": on_dialog_check} if on_dialog_check else {}))
         if not hb:
             if exit_on_error:
                 print("Error: Unity did not recover in time", file=sys.stderr)
@@ -416,16 +424,23 @@ def poll_async_job(
     project_path: str | None,
     *,
     stop_foreign_play: bool = False,
+    on_dialog_check=None,
 ) -> dict:
     """非同期ジョブを開始→ポーリング→完了結果を返す"""
     current_port = port
+    dialog_options = {"on_dialog_check": on_dialog_check} if on_dialog_check else {}
     started_at = time.time()
     request_timeout_ms = max(30000, min(int(timeout_ms), 120000))
     request_timeout_s = request_timeout_ms / 1000.0 + 5.0
+    if on_dialog_check:
+        # メインスレッドがダイアログで止まっても、同期走査へ短時間で戻る。
+        request_timeout_s = min(request_timeout_s, 5.0)
     start_retry_deadline = time.time() + min(20.0, max(timeout_ms / 1000.0, 5.0))
 
     # 1. ジョブ開始リクエスト（即座に返る）
     while True:
+        if on_dialog_check:
+            on_dialog_check()
         start_req = build_request(command, params, request_timeout_ms, False)
         try:
             resp = send_with_retry(
@@ -434,6 +449,7 @@ def poll_async_job(
                 start_req,
                 timeout_s=request_timeout_s,
                 project_path=project_path,
+                **dialog_options,
             )
         except socket.timeout:
             if time.time() < start_retry_deadline:
@@ -480,10 +496,13 @@ def poll_async_job(
                 timeout_s=15,
                 project_path=project_path,
                 exit_on_error=False,
+                **dialog_options,
             )
+        except EditorDialogBlocking:
+            raise
         except Exception:
             pass
-        hb = wait_for_connection(project_path, require_tcp=True)
+        hb = wait_for_connection(project_path, require_tcp=True, **dialog_options)
         if not hb:
             return {"ok": False, "error": {"code": "reconnect_failed", "message": "Failed to reconnect after stopping Play mode"}}
         if hb.get("port"):
@@ -497,6 +516,7 @@ def poll_async_job(
             timeout_s=request_timeout_s,
             project_path=project_path,
             exit_on_error=False,
+            **dialog_options,
         )
         if not resp.get("ok"):
             return resp
@@ -525,6 +545,8 @@ def poll_async_job(
     while time.time() < deadline:
         time.sleep(POLL_INTERVAL)
 
+        if on_dialog_check:
+            on_dialog_check()
         poll_req = build_request(command, poll_params, request_timeout_ms, False)
         try:
             resp = send_request_to_current_transport(
@@ -544,7 +566,8 @@ def poll_async_job(
                 print("Unity process not found and heartbeat stale, falling back to local data", file=sys.stderr)
                 break
             remaining = max(int((deadline - time.time()) / CONNECTION_RETRY_INTERVAL), 1)
-            hb = wait_for_connection(project_path, max_retries=min(remaining, CONNECTION_RETRY_MAX), require_tcp=True)
+            hb = wait_for_connection(project_path, max_retries=min(remaining, CONNECTION_RETRY_MAX), require_tcp=True,
+                                     **dialog_options)
             if hb:
                 if hb.get("port"):
                     current_port = int(hb["port"])
