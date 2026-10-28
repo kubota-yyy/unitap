@@ -151,7 +151,7 @@ on handleWindow(editorPid, j)
 end handleWindow
 
 on scanEditors()
-    set records to ""
+    set dialogRows to ""
     with timeout of 5 seconds
         tell application "System Events" to set unityPids to unix id of (every process whose name is "Unity")
     end timeout
@@ -163,12 +163,12 @@ on scanEditors()
             end timeout
             repeat with j from winCount to 1 by -1
                 try
-                    set records to records & my handleWindow(editorPid, j)
+                    set dialogRows to dialogRows & my handleWindow(editorPid, j)
                 end try
             end repeat
         end try
     end repeat
-    return records
+    return dialogRows
 end scanEditors
 '''
 

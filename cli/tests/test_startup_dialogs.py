@@ -63,6 +63,17 @@ class SafeModeDialogTests(unittest.TestCase):
                     )
                     self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_empty_scan_runs_without_accessing_editors(self):
+        # AppleScript accepts "records" at compile time but treats it as a class at runtime.
+        source = unity._KNOWN_DIALOG_HANDLERS.replace(
+            'tell application "System Events" to set unityPids to unix id of (every process whose name is "Unity")',
+            'set unityPids to {}',
+        ) + '\nreturn scanEditors()\n'
+        result = subprocess.run(["osascript", "-e", source],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual("", result.stdout.strip())
+
     def test_dialog_record_escapes_json_without_accessing_editors(self):
         source = (unity._KNOWN_DIALOG_HANDLERS
                   + '\nreturn dialogRecord("remaining", 12, "Save \\"scene\\"?" & linefeed & "next", "", "")\n')
