@@ -39,6 +39,7 @@ from .unicli_bridge import prepare_unicli, register as register_unicli
 from .discovery import register as register_discovery
 from .session_commands import register as register_session_commands
 from .clone import register as register_clone
+from .test_runs import register as register_test_runs
 from .identity import ALLOW_FOREIGN_ENV, check_cli_identity, foreign_cli_allowed
 from .lease import (
     EditorLeasedError,
@@ -211,12 +212,13 @@ def _should_skip_polling_history(args) -> bool:
 
 
 # project 未指定でも動く (実行中 Editor からの推測もしない) コマンド
-_PROJECT_OPTIONAL_COMMANDS = ("commands", "describe", "editors", "doctor")
+_PROJECT_OPTIONAL_COMMANDS = ("commands", "describe", "editors", "doctor", "test_runs")
 # CLI と対象プロジェクトの unitap コピーの一致確認を省くコマンド (診断・探索用)
-_IDENTITY_CHECK_EXEMPT_COMMANDS = ("commands", "describe", "editors", "doctor")
+_IDENTITY_CHECK_EXEMPT_COMMANDS = ("commands", "describe", "editors", "doctor", "test_runs")
 # Unity のダイアログ監視 (osascript) を起動しないコマンド
 _NO_DIALOG_WATCH_COMMANDS = (
     "focus", "unicli", "exec", "eval", "commands", "describe", "editors", "lease", "clone", "quit", "doctor", "dismiss_dialogs",
+    "test_runs",
 )
 
 
@@ -553,6 +555,7 @@ def build_parser():
     register_unicli(subparsers, dispatch_table)
     register_session_commands(subparsers, dispatch_table)
     register_clone(subparsers, dispatch_table)
+    register_test_runs(subparsers, dispatch_table)
 
     # --- Extension registration ---
     if _ext_module and hasattr(_ext_module, "register"):

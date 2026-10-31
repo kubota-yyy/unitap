@@ -76,6 +76,19 @@ unitap --json wait_result --done <dir>/done.txt --fail <dir>/failure.txt --progr
 
 排他は Unitap を経由する処理にのみ有効。非同期処理が開始応答を返した後までロックが継続する保証はない。履歴は `Library/Unitap/execution-history.jsonl`（8MB で `.1.jsonl` に 1 世代だけ退避。`UNITAP_HISTORY_MAX_BYTES` で変更、0 で無制限）。各行にセッション ID・lock/lease 待ち時間を残し、終了コードが非0なら成功として記録しない。`wait_result` はマーカーのパス・待機条件・終了理由・経過秒・開始検知の有無を記録する。exec / eval は backend・operation・コマンド名・timeout のみを要求情報に記録し、C# 本文や追加引数を記録しない。機能探索は履歴を増やさない。
 
+## テスト結果を記録する（test_runs）
+
+- EditMode・撮影QA・Automate など、プロジェクトごとに作りの違うテストの結果を、流し終えるたびに `test_runs record` で1行ずつ残す。置き場所はこの Mac の `~/.unitap/test-runs.jsonl`（`UNITAP_TEST_RUNS_PATH` で変更、8MB で `.1.jsonl` に1世代退避）。clone で流した分も元のプロジェクト（`clone.json` の source のフォルダ名）として記録するので、clone を消しても残る。
+- 1行は `{schema: 1, project, host, kind, suite, trigger, status, startedAt, completedAt, seconds, total, passed, failed, skipped, failures[≤10], commit, branch, session, runDir}`。`kind` は `unit` / `qa` / `automate` / `smoke` など、`suite` はメニュー・pack・フィクスチャの正規表現・label。`status` は `passed` / `failed` / `cancelled` / `error` / `timeout` / `skipped`（`done`・`success` なども受け付けて揃える）。`trigger` は `manual` / `nightly` / `release` / `repair` / `ci`（既定は `UNITAP_TEST_TRIGGER`、無ければ manual）。
+- 結果を JSON に書くランナーは `--from-json <summary.json>` で読ませる（`kind`・`suite`/`menu`/`label`/`pattern`・`status`・`startedAt`・`seconds`・`total`/`passed`/`failed`/`skipped`・`failures`/`failure`）。フラグを付けた項目はフラグが勝つ。Python のランナーは `unitap_pkg.test_runs.record_test_run(...)` を直接呼んでよい。記録に失敗してもテストの成否は変えない。
+- 読むのは `test_runs list [--since 7d] [--kind] [--suite]` と `test_runs summary [--since 30d]`（プロジェクト×種類ごとに、最後の実行・suite数・失敗中の suite）。既定は `--project` のプロジェクトだけで、`--all-projects` でこの Mac の全部。Editor は使わず、ロックも取らない。
+
+```sh
+unitap --json test_runs record --kind qa --suite "NEK/QA/Home health notice" --status done --seconds 15.8 --run-dir .tmp/qa-runs/<id>
+unitap --json test_runs record --from-json .tmp/qa-runs/<id>/summary.json --trigger nightly
+unitap --json test_runs summary --all-projects
+```
+
 ## 複数 Editor・複数セッションで使う
 
 1 台の Mac で複数プロジェクトの Editor を同時に動かしてよい。Unitap は対象を `--project` の Editor だけに限定する。

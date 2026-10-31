@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Add `test_runs record|list|summary`: every project's test runner (EditMode, screenshot QA, Automate packs) writes one normalized line per run to this Mac's `~/.unitap/test-runs.jsonl` (`UNITAP_TEST_RUNS_PATH`), recorded under the source project even when run in a clone, so dashboards read one file per Mac. `--from-json` reads a runner's summary.json; Python runners can call `unitap_pkg.test_runs.record_test_run`.
 - `quit` no longer reports "Unity is not running" when the process table could not be read (slow `ps` under load is retried, then fails with `process_list_failed`) or when a fresh heartbeat PID is still alive (`unity_quit_unconfirmed`). `editors` shows each Editor's last command, session and `idleMinutes` so Editors left open by finished sessions are easy to spot; the agent guide asks agents to quit their Editors when work ends.
 - `editors` adds `uptimeMinutes`, `batchMode` and `staleCandidate` (with `notStaleBecause`): only an interactive Editor used through unitap since it started, idle for 6 hours (`UNITAP_STALE_EDITOR_MINUTES`) and not leased, locked, compiling or in batch mode is a candidate, so an Editor opened by hand or a batch build is never offered for closing.
 - Single source of truth: consumers pin this repository as a `<repo>/unitap` submodule and run `<repo>/scripts/unitap`. Commands fail with `unitap_copy_mismatch` when the CLI is not the copy the project's Unity loads (`UNITAP_ALLOW_FOREIGN_CLI=1` overrides); `doctor` reports the CLI/package link, the pinned vs checked-out submodule commit and dirty state.
