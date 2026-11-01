@@ -180,10 +180,16 @@ def build_test_run(
         "seconds": round(float(seconds), 2) if seconds is not None else None,
         **counts,
         "failures": [_clip(item) for item in (failures or []) if str(item).strip()][:MAX_FAILURES],
-        "commit": _git(git_root, "rev-parse", "--short=12", "HEAD") if git_root else None,
-        "branch": _git(git_root, "rev-parse", "--abbrev-ref", "HEAD") if git_root else None,
+        "commit": (_git(git_root, "rev-parse", "--short=12", "HEAD") if git_root else None)
+        or os.environ.get("UNITAP_SOURCE_COMMIT") or None,
+        "branch": (_git(git_root, "rev-parse", "--abbrev-ref", "HEAD") if git_root else None)
+        or os.environ.get("UNITAP_SOURCE_BRANCH") or None,
         "session": resolve_session_owner(),
     }
+    # Ran in a pool Mac's mirror (remote.py): which Mac sent it and which mirror it used.
+    if os.environ.get("UNITAP_REMOTE_ORIGIN"):
+        entry["origin"] = os.environ["UNITAP_REMOTE_ORIGIN"]
+        entry["mirror"] = os.environ.get("UNITAP_REMOTE_MIRROR")
     if run_dir:
         entry["runDir"] = str(run_dir)
     if message:

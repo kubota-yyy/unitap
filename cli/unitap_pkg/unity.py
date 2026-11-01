@@ -746,6 +746,11 @@ def focus_unity_editor(
     log_failures: bool = False,
 ) -> bool:
     """Unity Editor を前面化する（macOSのみ）。"""
+    if os.environ.get("UNITAP_NO_FOCUS", "").strip() not in ("", "0", "false"):
+        # 人が画面を使っているプールの Mac（remote.py の interactive ホスト）では前面化しない。
+        if log_failures:
+            print("[unitap] Unity focus is disabled (UNITAP_NO_FOCUS).", file=sys.stderr)
+        return False
     if platform.system().lower() != "darwin":
         if log_failures:
             print("[unitap] Unity focus is not supported on this OS.", file=sys.stderr)

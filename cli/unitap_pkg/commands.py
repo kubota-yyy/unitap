@@ -11,7 +11,7 @@ from .constants import (
     DEFAULT_TIMEOUT_MS,
     POLL_INTERVAL,
 )
-from . import qa_repeat
+from . import gui_launch, qa_repeat
 from .editor_lock import enrich_diagnose_result_with_editor_lock
 from .editor_slots import DEFAULT_WAIT_SLOT_TIMEOUT, EditorSlotUnavailable, editor_slot
 from .lease import resolve_session_owner
@@ -202,15 +202,19 @@ def _launch_editor_process(args, project_root, version, editor_path, running_sam
         build_target=expected_build_target,
     )
     print(f"Launching Unity {version}...", file=sys.stderr)
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env=build_unity_launch_environment(),
-        start_new_session=True,
-    )
+    if gui_launch.wanted():
+        # Over ssh (pool Mac) the Editor must start in the logged-in GUI session.
+        pid = gui_launch.spawn(cmd, build_unity_launch_environment(), project_root)
+    else:
+        pid = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=build_unity_launch_environment(),
+            start_new_session=True,
+        ).pid
 
-    slot.started(process.pid)
+    slot.started(pid)
     return killed, expected_build_target
 
 

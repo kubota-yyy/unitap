@@ -137,6 +137,29 @@ unitap --json clone remove --dest <clone>                 # 未コミット変�
 
 gitignore 済みで Unity が必要とするファイル（SDK・symlink 等）も複製し、元リポジトリ内を絶対パスで指す symlink は複製内の同じ場所へ張り替える（元のファイルを複製の Editor が書き換えないため）。元の外を指す symlink は共有のまま残り、`warnings` に件数が出る。複製は ProjectSettings（companyName / productName）が元と同じため、Play Mode の PlayerPrefs と `Application.persistentDataPath` を元の Editor と共有する。セーブデータを書き換える Play 検証を並行させる場合は、プロジェクト側の隔離手段（検証用データ保存先など）を使う。clone の実機ビルド・アプリ ID の扱いは利用プロジェクトの規約に従う。compile_check は Play Mode を止めてから実行するが、別セッションが `play` した Play Mode は止めずに `play_mode_in_use` で失敗する（止めてよい場合だけ `--stop-foreign-play`）。
 
+## 空いている Mac で動かす（hosts / remote）
+
+1台の Editor 枠（上の上限）が埋まっている時は、別の Mac（プール）で同じ作業を続ける。プールは `~/.unitap/hosts.json`（`UNITAP_HOSTS_FILE` で変更）に書く。各ホストは `ssh`（`user@host.local`、鍵でパスワードなし）、任意で `maxEditors`・`priority`（大きいほど優先）・`reserved`（`[{"from":"23:00","to":"07:30","why":"..."}]` の時間帯は新しく振り分けない）・`interactive`（人が画面を使う Mac。使用中は後回しにし、Editor を前面に出さない。`avoidWhenActive: true` なら使用中は使わない）・`disabled`。
+
+- **既定の動き**: hosts.json があり Claude Code / Codex のセッション内（`CLAUDE_CODE_SESSION_ID` 等がある）なら `--host auto` と同じ。Unity の作業を始めるコマンド（`launch`・`compile_check`・`execute_menu` など）は、この Mac で対象プロジェクトの Editor が動いていれば（他セッションの lease 中を除く）、または空き枠とメモリ 20% 以上があればこの Mac で動く。どちらも無い時だけ、空き枠・メモリ・優先度・人の使用・暖まった複製の有無で選んだ Mac へ回す。どこも空いていなければこの Mac で従来どおり枠を待つ。
+- **決まった場所は続くコマンドにも効く**: 回した先はエージェントのセッション×プロジェクトごとに `~/.unitap/remote-placements.json` へ記録され、以後のコマンド（`status`・`wait_result`・`quit`・`lease`・`editors` を含む）は `--host` を付けなくても同じ Editor へ届く（12時間使わなければ失効）。この Mac で動かしたい時だけ `--host local`（または `UNITAP_HOST=local`）。特定の Mac は `--host eipoc` のように名前で指定する。
+- **作業ツリーの写し**: 回した先には `~/.unitap/remote/<key>/<label>/` に複製（mirror）を1セッション1つ持つ。プロジェクトを読むコマンドの前に毎回、未コミット・未追跡を含む作業ツリーを rsync する（Library・Temp・Logs・obj・.tmp・Build・IOS_Distribution*・.git は送らない）。`file:` 参照のパッケージがプロジェクトの外にあれば、共通の親から同じ相対配置で送る。初回はプロジェクトと Library を送るので数分かかり、2つ目以降の複製は既存の複製から APFS clone で作る。プロジェクト直下の `unitap-remote.json` で `sync`（追加で送るパス。プロジェクトからの相対）と `exclude`（rsync の除外パターン）を足せる。
+- **結果**: 出力中の複製内のパスは手元のパスへ書き換え、名前の出たファイル・フォルダ（git 管理外）は手元の同じ場所へ持ち帰る。JSON 出力には `remote`（host・label・持ち帰ったパス）が付く。スクリプトが結果ファイルを自分で待つ時は `remote pull <手元のパス>...` で取り寄せる。引数の手元の絶対パスは複製内のパスへ直して渡す（相対パスは直さない）。QA の繰り返し防止（qa_repeat）は手元の git で判定する。`test_runs` は回した先の Mac に `origin`・`mirror` 付きで残る。
+- **始める前に決める**: lease を取ってから QA を流すスクリプトは、先に `remote place` を呼ぶ（`launch` と同じ判断で場所を決めて同期する。手元なら `placement: null`）。以後の `lease acquire` も同じ Editor に掛かる。
+- **終わる時**: `remote release` で回した先の Editor を閉じて複製を手放す（手元なら何もしない）。複製は残り、次のセッションが暖まった Library のまま使う。2時間触られていない複製の Editor は、別セッションが複製を取る時に閉じられる。`remote prune --days 14` で長く使っていない複製を消す。
+- **見る**: `hosts` で全 Mac の空き枠・メモリ・負荷・人の使用・Unity バージョン・複製と、今ならどこに置くか（`recommended`）。`remote status` でこのセッションの置き場所。
+- **回した先での起動**: ssh 越しの `launch` は、ログイン中ユーザーの GUI セッションへ launchd ジョブ（`gui/<uid>`）で Editor を起動する（ssh から直接起動した GUI アプリは WindowServer に繋がらず落ちる）。`UNITAP_GUI_LAUNCH=1/0` で強制・無効。`UNITAP_NO_FOCUS=1` は Editor の前面化をすべて止める（interactive ホストへ回した時は自動で付き、起動直後に Editor が前に出たら元のアプリへ戻す）。
+- 回した先にも同じ Unity バージョンが要る（`/Applications/Unity/Hub/Editor/<version>`）。無い Mac は選ばれない。
+
+```sh
+scripts/unitap --json hosts                     # どの Mac が空いているか
+scripts/unitap --json compile_check             # 手元が埋まっていれば自動で空いた Mac へ
+scripts/unitap --json --host eipoc launch       # 名前で指定
+scripts/unitap --json remote status
+scripts/unitap --json remote pull .tmp/qa-runs/latest.txt
+scripts/unitap --json remote release            # 作業の終わりに
+```
+
 ## 独自ツールにも説明を付ける
 
 ```csharp

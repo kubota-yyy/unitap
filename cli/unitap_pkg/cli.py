@@ -40,6 +40,7 @@ from .discovery import register as register_discovery
 from .session_commands import register as register_session_commands
 from .clone import register as register_clone
 from .test_runs import register as register_test_runs
+from . import remote as remote_pool
 from .identity import ALLOW_FOREIGN_ENV, check_cli_identity, foreign_cli_allowed
 from .lease import (
     EditorLeasedError,
@@ -212,13 +213,13 @@ def _should_skip_polling_history(args) -> bool:
 
 
 # project 未指定でも動く (実行中 Editor からの推測もしない) コマンド
-_PROJECT_OPTIONAL_COMMANDS = ("commands", "describe", "editors", "doctor", "test_runs")
+_PROJECT_OPTIONAL_COMMANDS = ("commands", "describe", "editors", "doctor", "test_runs", "hosts", "remote")
 # CLI と対象プロジェクトの unitap コピーの一致確認を省くコマンド (診断・探索用)
-_IDENTITY_CHECK_EXEMPT_COMMANDS = ("commands", "describe", "editors", "doctor", "test_runs")
+_IDENTITY_CHECK_EXEMPT_COMMANDS = ("commands", "describe", "editors", "doctor", "test_runs", "hosts", "remote")
 # Unity のダイアログ監視 (osascript) を起動しないコマンド
 _NO_DIALOG_WATCH_COMMANDS = (
     "focus", "unicli", "exec", "eval", "commands", "describe", "editors", "lease", "clone", "quit", "doctor", "dismiss_dialogs",
-    "test_runs",
+    "test_runs", "hosts", "remote",
 )
 
 
@@ -276,6 +277,12 @@ def build_parser():
         type=float,
         default=30.0,
         help="Maximum seconds to wait for each lock/lease (default: 30; increase explicitly for a planned wait)",
+    )
+    parser.add_argument(
+        "--host",
+        default=None,
+        help="Where to run: auto (a pool Mac with room, see `hosts`), local, or a name from ~/.unitap/hosts.json. "
+        "Default: $UNITAP_HOST, else auto inside Claude Code/Codex sessions when hosts.json exists, else local",
     )
     parser.add_argument(
         "--ignore-lease",
@@ -556,6 +563,7 @@ def build_parser():
     register_session_commands(subparsers, dispatch_table)
     register_clone(subparsers, dispatch_table)
     register_test_runs(subparsers, dispatch_table)
+    remote_pool.register(subparsers, dispatch_table)
 
     # --- Extension registration ---
     if _ext_module and hasattr(_ext_module, "register"):
@@ -708,6 +716,19 @@ def _main():
                     "override": f"{ALLOW_FOREIGN_ENV}=1",
                 },
             )
+            sys.exit(1)
+
+    # Run on another Mac of the pool when this one is busy (or the session is already placed there).
+    if resolved_project is not None:
+        try:
+            placement = remote_pool.decide(args, resolved_project)
+            if placement is not None:
+                code = remote_pool.forward(args, placement, resolved_project)
+                setattr(args, "_command_exit_code", code)
+                sys.exit(code)
+        except remote_pool.RemoteError as ex:
+            _print_cli_error(args, ex.code, ex.message, ex.details)
+            setattr(args, "_command_exit_code", 1)
             sys.exit(1)
 
     # Missing external backends cannot use the Editor. Report before any lease/lock wait.
