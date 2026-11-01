@@ -445,12 +445,28 @@ def sync_tree(layout: dict, target: str, root: str) -> list[str]:
     return synced
 
 
+def _tar_copy(source: Path, target: str, dest: str, excludes: list[str], timeout: float) -> None:
+    """One tar stream over ssh: far faster than openrsync for a fresh copy of many small files (Library)."""
+    patterns = [f"--exclude=./{e.strip('/')}" if e.startswith("/") else f"--exclude={e.strip('/')}" for e in excludes]
+    pack = subprocess.Popen(["tar", "-cf", "-", *patterns, "-C", str(source), "."], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
+    unpack = subprocess.run(["ssh", *SSH_OPTIONS, target, shlex.join(["mkdir", "-p", dest]) + " && "
+                             + shlex.join(["tar", "-xf", "-", "-C", dest])], stdin=pack.stdout,
+                            capture_output=True, text=True, timeout=timeout)
+    pack.stdout.close()
+    _, pack_err = pack.communicate(timeout=60)
+    if unpack.returncode != 0:
+        raise RemoteError("copy_failed", (unpack.stderr or "").strip()[-600:] or f"remote tar exit {unpack.returncode}",
+                          {"source": str(source)})
+    if pack.returncode not in (0, 1):  # 1: a file changed while it was read (Editor running here)
+        raise RemoteError("copy_failed", pack_err.decode(errors="replace").strip()[-600:], {"source": str(source)})
+
+
 def seed_library(layout: dict, target: str, root: str) -> bool:
     library = layout["project"] / "Library"
     if not library.is_dir():
         return False
-    _rsync(["-a", *[f"--exclude={e}" for e in LIBRARY_EXCLUDES], str(library) + "/",
-            f"{target}:{root}/{layout['projectRel']}/Library/"], timeout=7200)
+    _tar_copy(library, target, f"{root}/{layout['projectRel']}/Library", list(LIBRARY_EXCLUDES), timeout=7200)
     return True
 
 
@@ -558,6 +574,10 @@ def prepare(placement: dict, layout: dict, *, sync: bool) -> dict:
         if claim.get("created") and not claim.get("seeded"):
             print(f"[unitap] first use of {host} for {layout['key']}: copying the project and its Library "
                   "(several minutes once)", file=sys.stderr, flush=True)
+            for item in layout["items"]:
+                if item["dir"]:  # bulk first copy; the rsync below then only checks
+                    excludes = layout["excludes"] if item["path"] == layout["project"] else [".git", ".DS_Store"]
+                    _tar_copy(item["path"], target, f"{root}/{item['rel']}", excludes, timeout=7200)
         sync_tree(layout, target, root)
         if not claim.get("libraryReady"):
             seed_library(layout, target, root)

@@ -69,6 +69,16 @@ class ArgsAndPathsTests(unittest.TestCase):
         self.assertEqual(["--json", "wait_result", "--done", "/r/m1/.tmp/qa-runs/1/done.txt",
                           "--fail", "/w/nek-unity-other/x"], out)
 
+    def test_tar_copy_anchors_leading_slash_patterns_only(self):
+        with patch.object(remote.subprocess, "Popen") as popen, patch.object(remote.subprocess, "run") as run:
+            popen.return_value.communicate.return_value = (b"", b"")
+            popen.return_value.returncode = 0
+            run.return_value.returncode = 0
+            remote._tar_copy(Path("/src"), "u@h", "/r/m1/Library", ["/Bee/", ".git", "/IOS_Distribution*/"], 10)
+        pack = popen.call_args[0][0]
+        self.assertEqual(["--exclude=./Bee", "--exclude=.git", "--exclude=./IOS_Distribution*"], pack[3:6])
+        self.assertIn("tar -xf - -C /r/m1/Library", run.call_args[0][0][-1])
+
     def test_mirror_paths_found_in_json_output(self):
         text = json.dumps({"runDir": "/r/m1/.tmp/qa-runs/7", "images": ["/r/m1/Artifacts/a.png"], "x": "/r/m10/y"})
         self.assertEqual(["/.tmp/qa-runs/7", "/Artifacts/a.png"], remote._mirror_paths_in(text, "/r/m1"))
