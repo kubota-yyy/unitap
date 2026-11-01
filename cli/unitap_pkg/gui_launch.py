@@ -61,7 +61,7 @@ def front():
 end = time.monotonic() + seconds
 while time.monotonic() < end:
     try:
-        if front() == "Unity":
+        if front() in ("Unity", "Unity Hub"):  # Unity 6.4+ also starts the Hub for its licence
             subprocess.run(["osascript", "-e", 'tell application "System Events" to set frontmost of process "%s" to true' % previous],
                            capture_output=True, timeout=10)
     except Exception:
@@ -77,7 +77,7 @@ def _frontmost_app() -> str | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     name = result.stdout.strip()
-    return name if result.returncode == 0 and name and name != "Unity" and '"' not in name else None
+    return name if result.returncode == 0 and name and name not in ("Unity", "Unity Hub") and '"' not in name else None
 
 
 def give_back_focus(seconds: float = 240) -> None:
