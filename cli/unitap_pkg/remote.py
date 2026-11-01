@@ -65,7 +65,12 @@ PASS_THROUGH_ENV = ("UNITAP_TEST_TRIGGER", "UNITAP_ALLOW_SUBSECOND_WAIT_IDLE", "
 DEFAULT_EXCLUDES = (
     "/Library/", "/Temp/", "/Logs/", "/obj/", "/.tmp/", "/Build/", "/Builds/", "/IOS_Distribution*/",
     "/.vs/", "/.idea/", "/*.csproj", "/*.sln", ".git", ".DS_Store", "/.unitap-mirror.json",
+    "/UserSettings/",
 )
+# Written by the mirror's own Editor: copied once with a new mirror, then never synced or deleted. A clone
+# without UserSettings made `rsync --delete` remove the Editor's folder, and Unity stopped on "Moving file
+# failed ... UserSettings/EditorUserSettings.asset" (eipoc, 2026-11-01).
+FIRST_COPY_ONLY = ("/UserSettings/",)
 LIBRARY_EXCLUDES = (
     "/Bee/", "/PlayerDataCache/", "/Unitap/", "/Search/", "/ArtifactDB-lock", "/SourceAssetDB-lock",
     "/EditorInstance.json", "/il2cpp_cache/", "/BuildPlayerData/", "/BuildCache/",
@@ -577,7 +582,8 @@ def prepare(placement: dict, layout: dict, *, sync: bool) -> dict:
                   "(several minutes once)", file=sys.stderr, flush=True)
             for item in layout["items"]:
                 if item["dir"]:  # bulk first copy; the rsync below then only checks
-                    excludes = layout["excludes"] if item["path"] == layout["project"] else [".git", ".DS_Store"]
+                    excludes = ([e for e in layout["excludes"] if e not in FIRST_COPY_ONLY]
+                                if item["path"] == layout["project"] else [".git", ".DS_Store"])
                     _tar_copy(item["path"], target, f"{root}/{item['rel']}", excludes, timeout=7200)
         sync_tree(layout, target, root)
         if not claim.get("libraryReady"):

@@ -79,6 +79,16 @@ class ArgsAndPathsTests(unittest.TestCase):
         self.assertEqual(["--exclude=./Bee", "--exclude=.git", "--exclude=./IOS_Distribution*"], pack[3:6])
         self.assertIn("tar -xf - -C /r/m1/Library", run.call_args[0][0][-1])
 
+    def test_sync_never_deletes_the_mirror_editors_user_settings(self):
+        project = Path("/w/rwd--x/rwd-unity")
+        layout = {"project": project, "excludes": list(remote.DEFAULT_EXCLUDES),
+                  "items": [{"path": project, "rel": "rwd-unity", "dir": True}]}
+        with patch.object(remote, "_rsync") as rsync:
+            remote.sync_tree(layout, "u@h", "/r/m2")
+        args = rsync.call_args[0][0]
+        self.assertIn("--delete", args)
+        self.assertIn("--exclude=/UserSettings/", args)
+
     def test_mirror_paths_found_in_json_output(self):
         text = json.dumps({"runDir": "/r/m1/.tmp/qa-runs/7", "images": ["/r/m1/Artifacts/a.png"], "x": "/r/m10/y"})
         self.assertEqual(["/.tmp/qa-runs/7", "/Artifacts/a.png"], remote._mirror_paths_in(text, "/r/m1"))
