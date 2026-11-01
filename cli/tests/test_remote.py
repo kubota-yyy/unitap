@@ -230,6 +230,13 @@ class HelperMirrorTests(unittest.TestCase):
         third = remote_helper.claim({"key": "nek-unity", "session": "c"})
         self.assertEqual(first["label"], third["label"])
 
+    def test_one_session_with_two_clones_gets_two_mirrors(self):
+        a = remote_helper.claim({"key": "rwd", "session": "s", "sourcePath": "/w/rwd--a/rwd-unity"})
+        b = remote_helper.claim({"key": "rwd", "session": "s", "sourcePath": "/w/rwd--b/rwd-unity"})
+        self.assertNotEqual(a["label"], b["label"])
+        again = remote_helper.claim({"key": "rwd", "session": "s", "sourcePath": "/w/rwd--a/rwd-unity"})
+        self.assertEqual(a["label"], again["label"])
+
     def test_stale_owner_gives_mirror_up(self):
         first = remote_helper.claim({"key": "k", "session": "a"})
         owner = remote_helper._owner_path("k", first["label"])
@@ -246,6 +253,24 @@ class HelperMirrorTests(unittest.TestCase):
 
     def test_bad_key_refused(self):
         self.assertFalse(remote_helper.claim({"key": "../x", "session": "a"})["ok"])
+
+
+class RelinkTests(unittest.TestCase):
+    def test_absolute_links_into_the_source_anchor_point_into_the_mirror(self):
+        tmp = Path(tempfile.mkdtemp())
+        source, root = tmp / "src", tmp / "mirror"
+        (root / "master" / "A").mkdir(parents=True)
+        db = root / "proj" / "Assets" / "DB"
+        db.mkdir(parents=True)
+        os.symlink(str(source / "master" / "A"), db / "A")
+        os.symlink("../relative", db / "rel")
+        os.symlink("/nowhere/else", db / "outside")
+        result = remote_helper.relink({"root": str(root), "projectRel": "proj", "source": str(source)})
+        self.assertEqual(1, result["relinked"])
+        self.assertEqual(str(root / "master" / "A"), os.readlink(db / "A"))
+        self.assertTrue((db / "A").is_dir())
+        self.assertEqual("../relative", os.readlink(db / "rel"))
+        self.assertEqual(["Assets/DB/outside"], result["dangling"])
 
 
 class GuiLaunchTests(unittest.TestCase):

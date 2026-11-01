@@ -220,7 +220,11 @@ def claim(params):
             if mirror["editorPids"] and not mirror["ownerActive"] and (mirror.get("owner") or {}).get("session") != session:
                 _quit_editor(mirror)
                 reaped.append(mirror["label"])
-        chosen = next((m for m in mirrors if (m.get("owner") or {}).get("session") == session), None)
+        # The same agent session may drive several clones (subagents share the session id): each clone keeps its own
+        # mirror, or one clone's sync overwrites the other's tree mid-run (eipoc m2, 2026-11-01).
+        source_path = params.get("sourcePath")
+        chosen = next((m for m in mirrors if (m.get("owner") or {}).get("session") == session
+                       and (m.get("owner") or {}).get("sourcePath") in (None, source_path)), None)
         wanted = params.get("label")
         if chosen is None and wanted:
             chosen = next((m for m in mirrors if m["label"] == wanted and not m["ownerActive"]), None)
@@ -358,7 +362,38 @@ def prune(params):
         handle.close()
 
 
-ACTIONS = {"probe": probe, "claim": claim, "touch": touch, "release": release, "list": list_mirrors, "prune": prune}
+def relink(params):
+    """Point the mirror's absolute symlinks at the mirror instead of the source Mac's paths.
+
+    rsync -a copies a link's text as is, so a link to /source/anchor/x dangles here (RWD MasterDB -> rwd-master:
+    every Automate failed with "master not found" on eipoc, 2026-11-01). Links into the anchor are rewritten to
+    root/x; links elsewhere are reported, since the mirror cannot reach them.
+    """
+    root, source = Path(params["root"]), str(params["source"]).rstrip("/")
+    project = root / params["projectRel"]
+    relinked, dangling = 0, []
+    for top in ("Assets", "Packages", "ProjectSettings"):
+        base = project / top
+        if not base.is_dir():
+            continue
+        for folder, dirs, names in os.walk(base, followlinks=False):
+            for name in [*dirs, *names]:
+                link = Path(folder) / name
+                if not link.is_symlink():
+                    continue
+                target = os.readlink(link)
+                if not target.startswith(source + "/"):
+                    if os.path.isabs(target) and not os.path.exists(target):
+                        dangling.append(str(link.relative_to(project)))
+                    continue
+                link.unlink()
+                os.symlink(str(root / target[len(source) + 1:]), link)
+                relinked += 1
+    return {"ok": True, "relinked": relinked, "dangling": dangling[:20], "danglingCount": len(dangling)}
+
+
+ACTIONS = {"probe": probe, "claim": claim, "touch": touch, "release": release, "list": list_mirrors, "prune": prune,
+           "relink": relink}
 
 
 def main(argv):

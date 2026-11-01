@@ -586,6 +586,15 @@ def prepare(placement: dict, layout: dict, *, sync: bool) -> dict:
                                 if item["path"] == layout["project"] else [".git", ".DS_Store"])
                     _tar_copy(item["path"], target, f"{root}/{item['rel']}", excludes, timeout=7200)
         sync_tree(layout, target, root)
+        links = call_helper(config, "relink", {"root": root, "projectRel": layout["projectRel"],
+                                               "source": str(layout["anchor"])}, timeout=300)
+        if not links.get("ok"):
+            raise RemoteError("relink_failed", str((links.get("error") or {}).get("message") or links), {"host": host})
+        if links.get("danglingCount"):
+            print(f"[unitap] {links['danglingCount']} symlink(s) in the {host} mirror point outside the mirrored tree "
+                  f"and dangle there, e.g. {links['dangling'][0]}; add their target to the project's sync list",
+                  file=sys.stderr, flush=True)
+        state["relinked"] = links.get("relinked", 0)
         if not claim.get("libraryReady"):
             seed_library(layout, target, root)
             touch["libraryReady"] = True
