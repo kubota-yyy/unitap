@@ -242,11 +242,29 @@ def drop_placement(session: str | None, project: Path) -> dict | None:
 
 # --- probing and choosing ---------------------------------------------------------------------------------
 
+def _cache_helper(source: str) -> None:
+    """Keep the latest helper at ~/.unitap/remote_helper.py for the launchd reaper.
+
+    launchd jobs may not read the external volume the checkouts live on ("Operation not permitted"), so the
+    30-minute reap (~/.agent-rules/unitap/reap-pool.py) sends this cached copy instead of running unitap.
+    """
+    cache = Path.home() / ".unitap" / "remote_helper.py"
+    try:
+        if not cache.is_file() or cache.read_text(encoding="utf-8") != source:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            staged = cache.with_name(cache.name + ".tmp")
+            staged.write_text(source, encoding="utf-8")
+            os.replace(staged, cache)
+    except OSError:
+        pass
+
+
 def call_helper(config: dict, action: str, params: dict, timeout: float = 60) -> dict:
     target = config.get("ssh")
     if not target:
         return remote_helper.ACTIONS[action](params)
     source = Path(remote_helper.__file__).read_text(encoding="utf-8")
+    _cache_helper(source)
     command = f"PATH={REMOTE_PATH} python3 - {shlex.quote(action)} {shlex.quote(json.dumps(params))}"
     try:
         result = subprocess.run(["ssh", *SSH_OPTIONS, target, command], input=source, capture_output=True,
