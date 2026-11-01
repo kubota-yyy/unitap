@@ -59,6 +59,43 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(["rwd-unity", "unitap", "Artifacts/ReferenceImages"], [i["rel"] for i in layout["items"]])
         self.assertIn("/Rom/", layout["excludes"])
 
+    def shared_project(self, shared):
+        repo = self.tmp / "rwd--x"
+        project = self.make_project(repo / "rwd-unity", {})
+        (project / "Assets").mkdir()
+        (project / "Assets" / "Defines.asset").write_text("  catalogVersion: 8.1.6\n")
+        (repo / "rwd-master").mkdir()
+        (project / "unitap-remote.json").write_text(json.dumps({"sync": ["../rwd-master"], "shared": shared}))
+        assets = self.tmp / "rwd-remote-asset"
+        for name in ("rwd-asset-8-1-5", "rwd-asset-8-1-6", "rwd-asset-8-1-6-ios"):
+            (assets / name).mkdir(parents=True)
+            (assets / name / "master.bytes").write_text(name)
+        return project
+
+    def test_shared_folder_beside_anchor_with_current_version_only(self):
+        project = self.shared_project([{
+            "path": "../../rwd-remote-asset", "only": ["rwd-asset-{version}", "rwd-asset-{version}-ios"],
+            "versionFrom": {"file": "Assets/Defines.asset", "pattern": r"catalogVersion: (\S+)", "slug": True}}])
+        layout = remote.project_layout(project)
+        self.assertEqual([{"path": (self.tmp / "rwd-remote-asset").resolve(), "rel": "../rwd-remote-asset",
+                           "only": ["rwd-asset-8-1-6", "rwd-asset-8-1-6-ios"]}], layout["shared"])
+        calls = []
+        state = self.tmp / "shared.json"
+        with patch.object(remote, "_shared_state_file", return_value=state), \
+                patch.object(remote.subprocess, "run"), \
+                patch.object(remote, "_rsync", side_effect=lambda args, timeout=3600: calls.append(args[-1])):
+            self.assertEqual(["../rwd-remote-asset"], remote.sync_shared(layout, "e@h", "/r/rwd/m1"))
+            self.assertEqual(["e@h:/r/rwd/rwd-remote-asset/rwd-asset-8-1-6/",
+                              "e@h:/r/rwd/rwd-remote-asset/rwd-asset-8-1-6-ios/"], calls)
+            self.assertEqual([], remote.sync_shared(layout, "e@h", "/r/rwd/m1"))  # unchanged: skipped
+            (self.tmp / "rwd-remote-asset" / "rwd-asset-8-1-6" / "master.bytes").write_text("new master")
+            self.assertEqual(["../rwd-remote-asset"], remote.sync_shared(layout, "e@h", "/r/rwd/m1"))
+
+    def test_shared_folder_must_sit_beside_anchor(self):
+        project = self.shared_project(["../../../elsewhere"])
+        with self.assertRaises(remote.RemoteError):
+            remote.project_layout(project)
+
 
 class ArgsAndPathsTests(unittest.TestCase):
     def test_rewrite_args_drops_project_and_host_and_maps_paths(self):

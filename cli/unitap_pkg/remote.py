@@ -173,7 +173,95 @@ def project_layout(project: Path) -> dict:
         "projectRel": os.path.relpath(project, anchor),
         "items": [{"path": p, "rel": os.path.relpath(p, anchor), "dir": p.is_dir()} for p in items],
         "excludes": list(DEFAULT_EXCLUDES) + [str(x) for x in config.get("exclude") or []],
+        "shared": _shared_entries(project, anchor, config.get("shared") or []),
     }
+
+
+def _shared_entries(project: Path, anchor: Path, raw: list) -> list[dict]:
+    """Folders beside the anchor that every clone shares (RWD ../rwd-remote-asset: generated master and bundles).
+
+    They land beside the mirrors on the pool Mac (~/.unitap/remote/<key>/<name>), where `../<name>` from a
+    mirror root resolves, and are synced once per change instead of with every mirror. `only` keeps the
+    subfolders to send; `{version}` in it comes from `versionFrom` (a regex over a project file).
+    """
+    entries = []
+    for value in raw:
+        entry = value if isinstance(value, dict) else {"path": value}
+        source = (project / str(entry["path"])).resolve()
+        rel = os.path.relpath(source, anchor)
+        parts = Path(rel).parts
+        if len(parts) != 2 or parts[0] != "..":
+            raise RemoteError("shared_not_beside_anchor",
+                              f"shared entry '{entry['path']}' must be a folder beside {anchor}", {"resolved": str(source)})
+        only = [str(p) for p in entry.get("only") or []]
+        version_from = entry.get("versionFrom")
+        if version_from:
+            text = (project / version_from["file"]).read_text(encoding="utf-8")
+            match = re.search(version_from["pattern"], text, re.MULTILINE)
+            if not match:
+                raise RemoteError("shared_version_not_found",
+                                  f"'{version_from['pattern']}' not found in {version_from['file']}", {})
+            version = match.group(1)
+            if version_from.get("slug"):
+                version = re.sub(r"[^A-Za-z0-9]", "-", version).lower()
+            only = [p.replace("{version}", version) for p in only]
+        entries.append({"path": source, "rel": rel, "only": only})
+    return entries
+
+
+def _shared_state_file() -> Path:
+    return Path.home() / ".unitap" / "remote-shared.json"
+
+
+def _shared_fingerprint(folders: list[Path]) -> str:
+    import hashlib
+
+    digest = hashlib.sha1()
+    for folder in folders:
+        for current, dirs, names in os.walk(folder):
+            dirs.sort()
+            for name in sorted(names):
+                stat = os.stat(os.path.join(current, name))
+                digest.update(f"{os.path.relpath(os.path.join(current, name), folder.parent)}\0{stat.st_size}\0"
+                              f"{stat.st_mtime_ns}\n".encode())
+    return digest.hexdigest()
+
+
+def sync_shared(layout: dict, target: str, root: str) -> list[str]:
+    """Send the shared folders that changed since they last reached this host; report the ones missing here."""
+    synced = []
+    state_file = _shared_state_file()
+    for entry in layout.get("shared") or []:
+        names = entry["only"] or [None]
+        folders = [entry["path"] / n if n else entry["path"] for n in names]
+        missing = [str(f) for f in folders if not f.is_dir()]
+        if missing:
+            print(f"[unitap] ERROR shared folder missing on this Mac, the mirror cannot use it: {', '.join(missing)}",
+                  file=sys.stderr, flush=True)
+        folders = [f for f in folders if f.is_dir()]
+        if not folders:
+            continue
+        dest = os.path.normpath(f"{root}/{entry['rel']}")
+        key = f"{target}:{dest}"
+        fingerprint = _shared_fingerprint(folders)
+        try:
+            known = json.loads(state_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            known = {}
+        if known.get(key) == fingerprint:
+            continue
+        subprocess.run(["ssh", *SSH_OPTIONS, target, shlex.join(["mkdir", "-p", dest])], check=True,
+                       capture_output=True, timeout=60)
+        print(f"[unitap] sending shared {entry['rel']} to {target} ({', '.join(f.name for f in folders)})",
+              file=sys.stderr, flush=True)
+        for folder in folders:
+            remote = f"{target}:{dest}" + (f"/{folder.name}/" if folder != entry["path"] else "/")
+            _rsync(["-a", "--delete", "--exclude=.DS_Store", str(folder) + "/", remote])
+        known[key] = fingerprint
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(json.dumps(known, indent=1), encoding="utf-8")
+        synced.append(entry["rel"])
+    return synced
 
 
 def entry_rel(layout: dict) -> str:
@@ -650,6 +738,9 @@ def prepare(placement: dict, layout: dict, *, sync: bool) -> dict:
                   f"and dangle there, e.g. {links['dangling'][0]}; add their target to the project's sync list",
                   file=sys.stderr, flush=True)
         state["relinked"] = links.get("relinked", 0)
+        shared = sync_shared(layout, target, root)
+        if shared:
+            state["sharedSynced"] = shared
         if not claim.get("libraryReady"):
             seed_library(layout, target, root)
             touch["libraryReady"] = True
