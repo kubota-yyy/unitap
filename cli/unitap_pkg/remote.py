@@ -508,12 +508,13 @@ def pull_paths(layout: dict, target: str, root: str, rels: list[str]) -> tuple[l
     """Copy mirror paths back to the same place in the local tree; never over git-tracked files."""
     pulled, skipped = [], []
     item_rels = [Path(i["rel"]) for i in layout["items"]]
-    project_rel = Path(layout.get("projectRel") or ".")
+    project_parts = Path(layout.get("projectRel") or ".").parts
+    project_parts = () if project_parts in ((), (".",)) else project_parts
     for rel in rels[:MAX_PULLED_PATHS]:
         rel = os.path.normpath(rel.strip("/")) if rel.strip("/") else ""
         rel_path = Path(rel)
-        inside_project = rel_path.parts[len(project_rel.parts) if str(project_rel) != "." else 0:] \
-            if str(project_rel) == "." or project_rel in rel_path.parents else ()
+        inside_project = (rel_path.parts[len(project_parts):]
+                          if rel_path.parts[:len(project_parts)] == project_parts else ())
         if (not rel or rel == "." or rel.startswith("..")
                 or any(rel_path == i or rel_path in i.parents for i in item_rels)
                 or (inside_project and inside_project[0] in EDITOR_STATE_DIRS)):
