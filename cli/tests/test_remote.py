@@ -254,6 +254,26 @@ class HelperMirrorTests(unittest.TestCase):
     def test_bad_key_refused(self):
         self.assertFalse(remote_helper.claim({"key": "../x", "session": "a"})["ok"])
 
+    def test_reap_quits_only_forgotten_idle_editors(self):
+        claims = {s: remote_helper.claim({"key": "k", "session": s, "sourcePath": f"/w/{s}"})
+                  for s in ("fresh", "forgot", "busy")}
+        roots = {s: c["root"] for s, c in claims.items()}
+        for session, claimed in claims.items():
+            if session != "fresh":
+                owner = remote_helper._owner_path("k", claimed["label"])
+                data = json.loads(owner.read_text())
+                data["updatedAt"] = time.time() - remote_helper.OWNER_STALE_SECONDS - 5
+                owner.write_text(json.dumps(data))
+        editors = [{"pid": 10 + i, "projectPath": roots[s]} for i, s in enumerate(("fresh", "forgot", "busy"))]
+        ps = [f"500 python3 {roots['busy']}/unitap/cli/unitap.py --json wait_result"]
+        with patch.object(remote_helper, "unity_editors", return_value=editors), \
+                patch.object(remote_helper, "_out", return_value="\n".join(ps)), \
+                patch.object(remote_helper, "_quit_editor") as quit_editor:
+            result = remote_helper.reap({})
+        self.assertEqual([[11]], [m["pids"] for m in result["reaped"]])
+        self.assertEqual(1, quit_editor.call_count)
+        self.assertEqual(1, len(result["keptBusy"]))
+
 
 class RelinkTests(unittest.TestCase):
     def test_absolute_links_into_the_source_anchor_point_into_the_mirror(self):

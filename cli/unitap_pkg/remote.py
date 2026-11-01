@@ -773,6 +773,18 @@ def do_remote(args, _port=None) -> None:
     project = _project_from_args(args)
     action = args.action
     hosts = load_hosts()
+    if action == "reap":
+        # Every pool Mac but this one (its Editors are not mirrors): quit Editors whose session forgot `release`.
+        local = local_host_name()
+        names = [args.target_host] if args.target_host else [h for h, c in hosts.items() if c.get("ssh") and h != local]
+        results = {}
+        for name in names:
+            try:
+                results[name] = call_helper(hosts.get(name) or {}, "reap", {"dryRun": args.dry_run}, timeout=600)
+            except RemoteError as error:  # a Mac asleep or off the network: try again next round
+                results[name] = {"ok": False, "error": {"code": error.code, "message": str(error)}}
+        _emit(args, {"ok": True, "result": results})
+        return
     if action == "prune":
         names = [args.target_host] if args.target_host else [h for h, c in hosts.items() if c.get("ssh")]
         results = {name: call_helper(hosts.get(name) or {}, "prune", {"days": args.days, "dryRun": args.dry_run},
@@ -842,12 +854,12 @@ def register(subparsers, dispatch_table) -> None:
     dispatch_table["hosts"] = do_hosts
 
     p_remote = subparsers.add_parser(
-        "remote", help="This session's placement on a pool Mac: place/status/release/sync/pull/prune")
-    p_remote.add_argument("action", choices=("place", "status", "release", "sync", "pull", "prune"))
+        "remote", help="This session's placement on a pool Mac: place/status/release/sync/pull/prune; reap quits forgotten Editors")
+    p_remote.add_argument("action", choices=("place", "status", "release", "sync", "pull", "prune", "reap"))
     p_remote.add_argument("paths", nargs="*", help="pull: local paths to fetch from the mirror")
     p_remote.add_argument("--keep-editor", action="store_true", help="release: leave the remote Editor running")
     p_remote.add_argument("--days", type=float, default=14, help="prune: remove mirrors unused this many days")
-    p_remote.add_argument("--dry-run", action="store_true", help="prune: list only")
-    p_remote.add_argument("--target-host", default=None, help="prune: only this host")
+    p_remote.add_argument("--dry-run", action="store_true", help="prune/reap: list only")
+    p_remote.add_argument("--target-host", default=None, help="prune/reap: only this host")
     p_remote.set_defaults(_skip_heartbeat=True)
     dispatch_table["remote"] = do_remote

@@ -193,6 +193,50 @@ def _quit_editor(mirror):
             pass
 
 
+def _commands_in(root, processes=None):
+    """unitap commands still running against a mirror (a long automate keeps its owner untouched for a while)."""
+    if processes is None:
+        processes = _out(["ps", "-axww", "-o", "pid=,command="]).splitlines()
+    base = str(root).rstrip("/") + "/"
+    busy = []
+    for line in processes:
+        parts = line.strip().split(None, 1)
+        if len(parts) == 2 and base in parts[1] and "Unity.app/Contents/MacOS/" not in parts[1] \
+                and "remote_helper" not in parts[1] and ("unitap" in parts[1] or "check.py" in parts[1]):
+            busy.append(int(parts[0]))
+    return busy
+
+
+def reap(params):
+    """Quit Editors of mirrors whose owner has not run unitap for OWNER_STALE_SECONDS (a forgotten release).
+
+    Run every 30 minutes from the source Mac (`unitap remote reap`, 2026-11-01 ユーザー「さぎょうおわったら
+    じどうてきにunityquitする」). An Editor with a unitap command still running in its mirror is left alone.
+    """
+    dry = bool(params.get("dryRun"))
+    handle = _lock()
+    try:
+        now, editors, reaped, kept = time.time(), unity_editors(), [], []
+        processes = _out(["ps", "-axww", "-o", "pid=,command="]).splitlines()
+        for key in (sorted(p.name for p in BASE.iterdir() if p.is_dir()) if BASE.is_dir() else []):
+            if not _KEY.match(key):
+                continue
+            for mirror in _mirrors(key, editors, now):
+                if not mirror["editorPids"] or mirror["ownerActive"]:
+                    continue
+                name = f"{key}/{mirror['label']}"
+                if _commands_in(mirror["root"], processes):
+                    kept.append(name)
+                    continue
+                if not dry:
+                    _quit_editor(mirror)
+                reaped.append({"mirror": name, "pids": mirror["editorPids"],
+                               "idleMinutes": int((now - float((mirror.get("owner") or {}).get("updatedAt") or 0)) / 60)})
+        return {"ok": True, "reaped": reaped, "keptBusy": kept, "dryRun": dry}
+    finally:
+        handle.close()
+
+
 def _reset_library(project):
     library = Path(project) / "Library"
     for name in LIBRARY_RESET:
@@ -411,7 +455,7 @@ def relink(params):
 
 
 ACTIONS = {"probe": probe, "claim": claim, "touch": touch, "release": release, "list": list_mirrors, "prune": prune,
-           "relink": relink}
+           "relink": relink, "reap": reap}
 
 
 def main(argv):
