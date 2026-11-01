@@ -68,7 +68,7 @@ DEFAULT_EXCLUDES = (
 )
 LIBRARY_EXCLUDES = (
     "/Bee/", "/PlayerDataCache/", "/Unitap/", "/Search/", "/ArtifactDB-lock", "/SourceAssetDB-lock",
-    "/EditorInstance.json", "/il2cpp_cache/", "/BuildPlayerData/",
+    "/EditorInstance.json", "/il2cpp_cache/", "/BuildPlayerData/", "/BuildCache/",
 )
 
 
