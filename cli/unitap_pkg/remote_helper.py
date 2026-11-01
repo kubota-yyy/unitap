@@ -372,6 +372,21 @@ def relink(params):
     root, source = Path(params["root"]), str(params["source"]).rstrip("/")
     project = root / params["projectRel"]
     relinked, dangling = 0, []
+    # Links the caller left out of rsync: make each one point into the mirror, swapping it in one rename so the
+    # running Editor never sees it missing.
+    for rel, target_rel in params.get("links") or []:
+        link, want = project / rel, str(root / target_rel)
+        if link.is_symlink() and os.readlink(link) == want:
+            continue
+        if link.exists() and not link.is_symlink():
+            continue
+        link.parent.mkdir(parents=True, exist_ok=True)
+        staged = link.with_name(f".{link.name}.unitap-link")
+        if staged.is_symlink():
+            staged.unlink()
+        os.symlink(want, staged)
+        os.replace(staged, link)
+        relinked += 1
     for top in ("Assets", "Packages", "ProjectSettings"):
         base = project / top
         if not base.is_dir():
@@ -386,8 +401,11 @@ def relink(params):
                     if os.path.isabs(target) and not os.path.exists(target):
                         dangling.append(str(link.relative_to(project)))
                     continue
-                link.unlink()
-                os.symlink(str(root / target[len(source) + 1:]), link)
+                staged = link.with_name(f".{link.name}.unitap-link")
+                if staged.is_symlink():
+                    staged.unlink()
+                os.symlink(str(root / target[len(source) + 1:]), staged)
+                os.replace(staged, link)
                 relinked += 1
     return {"ok": True, "relinked": relinked, "dangling": dangling[:20], "danglingCount": len(dangling)}
 

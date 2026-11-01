@@ -80,7 +80,7 @@ class UniCliBridgeTests(unittest.TestCase):
                 with editor_lock.editor_operation_lock(project, {'command': 'compile_check'}, wait=False, timeout_s=0):
                     result = subprocess.run([sys.executable, str(cli), '--project', str(project),
                         '--no-wait-lock', '--json', *operation], capture_output=True, text=True, timeout=10,
-                        env=dict(os.environ, UNITAP_UNICLI_BIN=sys.executable))
+                        env=dict(os.environ, UNITAP_HOST='local', UNITAP_UNICLI_BIN=sys.executable))
                 self.assertEqual(1, result.returncode)
                 self.assertEqual('editor_busy', json.loads(result.stdout)['error']['code'])
 
@@ -94,7 +94,7 @@ class UniCliBridgeTests(unittest.TestCase):
             with editor_lock.editor_operation_lock(project, {'command': 'compile_check'}, wait=False, timeout_s=0):
                 result = subprocess.run([sys.executable, str(cli), '--project', str(project), '--json',
                     'eval', 'return 1;'], capture_output=True, text=True, timeout=5,
-                    env=dict(os.environ, UNITAP_UNICLI_BIN='/unitap-test/missing-unicli'))
+                    env=dict(os.environ, UNITAP_HOST='local', UNITAP_UNICLI_BIN='/unitap-test/missing-unicli'))
             self.assertEqual(1, result.returncode)
             self.assertEqual('unicli_not_found', json.loads(result.stdout)['error']['code'])
             history = json.loads((project / 'Library/Unitap/execution-history.jsonl').read_text().splitlines()[-1])

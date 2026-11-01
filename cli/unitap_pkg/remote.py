@@ -22,6 +22,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -437,13 +438,48 @@ def _rsync(args: list[str], timeout: float = 3600) -> None:
                           {"args": args[-2:]})
 
 
-def sync_tree(layout: dict, target: str, root: str) -> list[str]:
+def anchor_links(layout: dict) -> list[list[str]]:
+    """The project's symlinks that point into the anchor by absolute path: [path under the project, target under the anchor].
+
+    rsync copies a link's text as is, so every sync turned these back into links to this Mac's paths until the
+    helper relinked them. In between, the mirror's running Editor met missing files and stopped on "Opening file
+    failed" (RWD MasterDB -> rwd-master on eipoc, 2026-11-01). They are now left out of rsync and kept by relink.
+    """
+    anchor = str(layout["anchor"]).rstrip("/")
+    project = layout["project"]
+    links = []
+    for top in ("Assets", "Packages", "ProjectSettings"):
+        base = project / top
+        if not base.is_dir():
+            continue
+        for folder, dirs, names in os.walk(base, followlinks=False):
+            for name in [*dirs, *names]:
+                path = os.path.join(folder, name)
+                if not os.path.islink(path):
+                    continue
+                target = os.readlink(path)
+                if target.startswith(anchor + "/") and not any(c in path for c in "*?[\\"):
+                    links.append([os.path.relpath(path, project), target[len(anchor) + 1:]])
+    return links
+
+
+def sync_tree(layout: dict, target: str, root: str, links: list[list[str]] | None = None) -> list[str]:
     synced = []
     for item in layout["items"]:
         remote = f"{target}:{root}/{item['rel']}"
         if item["dir"]:
             excludes = layout["excludes"] if item["path"] == layout["project"] else [".git", ".DS_Store"]
-            _rsync(["-a", "--delete", *[f"--exclude={e}" for e in excludes], str(item["path"]) + "/", remote + "/"])
+            args = ["-a", "--delete", *[f"--exclude={e}" for e in excludes]]
+            if links and item["path"] == layout["project"]:
+                # Excluded entries are neither copied nor deleted, so the relinked mirror links stay put.
+                listing = Path(tempfile.mkstemp(prefix="unitap-links-", suffix=".txt")[1])
+                listing.write_text("".join(f"/{rel}\n" for rel, _ in links), encoding="utf-8")
+                args.append(f"--exclude-from={listing}")
+            try:
+                _rsync([*args, str(item["path"]) + "/", remote + "/"])
+            finally:
+                if links and item["path"] == layout["project"]:
+                    listing.unlink(missing_ok=True)
         else:
             _rsync(["-a", str(item["path"]), remote])
         synced.append(item["rel"])
@@ -585,9 +621,10 @@ def prepare(placement: dict, layout: dict, *, sync: bool) -> dict:
                     excludes = ([e for e in layout["excludes"] if e not in FIRST_COPY_ONLY]
                                 if item["path"] == layout["project"] else [".git", ".DS_Store"])
                     _tar_copy(item["path"], target, f"{root}/{item['rel']}", excludes, timeout=7200)
-        sync_tree(layout, target, root)
+        wanted = anchor_links(layout)
+        sync_tree(layout, target, root, wanted)
         links = call_helper(config, "relink", {"root": root, "projectRel": layout["projectRel"],
-                                               "source": str(layout["anchor"])}, timeout=300)
+                                               "source": str(layout["anchor"]), "links": wanted}, timeout=300)
         if not links.get("ok"):
             raise RemoteError("relink_failed", str((links.get("error") or {}).get("message") or links), {"host": host})
         if links.get("danglingCount"):

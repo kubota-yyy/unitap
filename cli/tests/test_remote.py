@@ -272,6 +272,40 @@ class RelinkTests(unittest.TestCase):
         self.assertEqual("../relative", os.readlink(db / "rel"))
         self.assertEqual(["Assets/DB/outside"], result["dangling"])
 
+    def test_listed_links_are_created_once_and_then_left_alone(self):
+        tmp = Path(tempfile.mkdtemp())
+        root = tmp / "mirror"
+        (root / "master" / "A").mkdir(parents=True)
+        (root / "proj" / "Assets").mkdir(parents=True)
+        params = {"root": str(root), "projectRel": "proj", "source": str(tmp / "src"),
+                  "links": [["Assets/DB/A", "master/A"]]}
+        self.assertEqual(1, remote_helper.relink(params)["relinked"])
+        self.assertEqual(str(root / "master" / "A"), os.readlink(root / "proj" / "Assets" / "DB" / "A"))
+        self.assertEqual(0, remote_helper.relink(params)["relinked"])
+
+    def test_anchor_links_stay_out_of_rsync(self):
+        tmp = Path(tempfile.mkdtemp())
+        anchor = tmp / "rwd"
+        project = anchor / "rwd-unity"
+        (anchor / "rwd-master" / "A").mkdir(parents=True)
+        db = project / "Assets" / "DB"
+        db.mkdir(parents=True)
+        os.symlink(str(anchor / "rwd-master" / "A"), db / "A@NORMAL@x")
+        os.symlink("../relative", db / "rel")
+        layout = {"anchor": anchor, "project": project, "excludes": [],
+                  "items": [{"path": project, "rel": "rwd-unity", "dir": True}]}
+        links = remote.anchor_links(layout)
+        self.assertEqual([["Assets/DB/A@NORMAL@x", "rwd-master/A"]], links)
+        listed = []
+
+        def fake_rsync(args, timeout=3600):
+            listing = next(a for a in args if a.startswith("--exclude-from="))
+            listed.append(Path(listing.split("=", 1)[1]).read_text())
+
+        with patch.object(remote, "_rsync", side_effect=fake_rsync):
+            remote.sync_tree(layout, "u@h", "/r/m1", links)
+        self.assertEqual(["/Assets/DB/A@NORMAL@x\n"], listed)
+
 
 class GuiLaunchTests(unittest.TestCase):
     def test_wanted_only_over_ssh_on_mac(self):
