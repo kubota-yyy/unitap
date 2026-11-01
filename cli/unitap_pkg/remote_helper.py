@@ -127,7 +127,10 @@ def _mirrors(key, editors=None, now=None):
     result = []
     if not folder.is_dir():
         return result
-    for root in sorted(p for p in folder.iterdir() if p.is_dir() and _LABEL.match(p.name)):
+    # Only folders unitap made are mirrors. Others sit beside them on purpose (RWD resolves ../rwd-remote-asset
+    # from the mirror root), and claim / prune must never take one over or delete it.
+    for root in sorted(p for p in folder.iterdir()
+                       if p.is_dir() and _LABEL.match(p.name) and (p / ".unitap-mirror.json").is_file()):
         owner = _read_json(_owner_path(key, root.name))
         meta = _read_json(root / ".unitap-mirror.json") or {}
         running = _mirror_editors(root, editors)

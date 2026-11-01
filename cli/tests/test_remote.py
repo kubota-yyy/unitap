@@ -230,6 +230,12 @@ class HelperMirrorTests(unittest.TestCase):
         third = remote_helper.claim({"key": "nek-unity", "session": "c"})
         self.assertEqual(first["label"], third["label"])
 
+    def test_folders_unitap_did_not_make_are_not_mirrors(self):
+        (self.base / "rwd" / "rwd-remote-asset").mkdir(parents=True)
+        claimed = remote_helper.claim({"key": "rwd", "session": "s"})
+        self.assertNotEqual("rwd-remote-asset", claimed["label"])
+        self.assertEqual([claimed["label"]], [m["label"] for m in remote_helper._mirrors("rwd")])
+
     def test_one_session_with_two_clones_gets_two_mirrors(self):
         a = remote_helper.claim({"key": "rwd", "session": "s", "sourcePath": "/w/rwd--a/rwd-unity"})
         b = remote_helper.claim({"key": "rwd", "session": "s", "sourcePath": "/w/rwd--b/rwd-unity"})
