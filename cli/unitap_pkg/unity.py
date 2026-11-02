@@ -151,7 +151,8 @@ on handleWindow(editorPid, j)
 end handleWindow
 
 on scanEditors()
-    set records to ""
+    -- "records" is an AppleScript class name ("every record"), so a variable of that name fails with -10006.
+    set foundRecords to ""
     with timeout of 5 seconds
         tell application "System Events" to set unityPids to unix id of (every process whose name is "Unity")
     end timeout
@@ -163,12 +164,12 @@ on scanEditors()
             end timeout
             repeat with j from winCount to 1 by -1
                 try
-                    set records to records & my handleWindow(editorPid, j)
+                    set foundRecords to foundRecords & my handleWindow(editorPid, j)
                 end try
             end repeat
         end try
     end repeat
-    return records
+    return foundRecords
 end scanEditors
 '''
 
