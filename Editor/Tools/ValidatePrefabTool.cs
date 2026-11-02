@@ -50,7 +50,11 @@ namespace Unitap.Tools
                         enterChildren = false;
                         if (sp.propertyType == SerializedPropertyType.ObjectReference)
                         {
+#if UNITY_6000_4_OR_NEWER
+                            if (sp.objectReferenceValue == null && sp.objectReferenceEntityIdValue.IsValid())
+#else
                             if (sp.objectReferenceValue == null && sp.objectReferenceInstanceIDValue != 0)
+#endif
                             {
                                 missingReferences.Add(new
                                 {

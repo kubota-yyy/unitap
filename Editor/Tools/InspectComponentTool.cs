@@ -121,13 +121,24 @@ namespace Unitap.Tools
                     if (prop.objectReferenceValue != null)
                         return new
                         {
+#if UNITY_6000_4_OR_NEWER
+                            // Unity 6.6 makes the int instance ID APIs compile errors; EntityId replaces them.
+                            instanceId = prop.objectReferenceValue.GetEntityId().ToString(),
+#else
                             instanceId = prop.objectReferenceValue.GetInstanceID(),
+#endif
                             name = prop.objectReferenceValue.name,
                             type = prop.objectReferenceValue.GetType().Name
                         };
+#if UNITY_6000_4_OR_NEWER
+                    return prop.objectReferenceEntityIdValue.IsValid()
+                        ? (object)new { missing = true, instanceId = prop.objectReferenceEntityIdValue.ToString() }
+                        : null;
+#else
                     return prop.objectReferenceInstanceIDValue != 0
                         ? (object)new { missing = true, instanceId = prop.objectReferenceInstanceIDValue }
                         : null;
+#endif
                 case SerializedPropertyType.LayerMask:
                     return prop.intValue;
                 case SerializedPropertyType.Quaternion:
