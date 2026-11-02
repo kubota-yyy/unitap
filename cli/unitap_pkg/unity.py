@@ -133,6 +133,11 @@ on handleWindow(editorPid, j)
             set buttonName to "Reload"
         end if
     end if
+    -- Unity 6.6 opens a modal "Importing N scoped registries" notice on the first open of a project
+    -- with scopedRegistries; the Editor stops until it is closed.
+    if buttonNames contains "Close" and dialogText contains "scoped registr" then
+        set buttonName to "Close"
+    end if
     if buttonNames contains "Cancel" and buttonNames contains "Open manual" then
         if dialogText contains "UI Toolkit Particles" then
             set buttonName to "Cancel"
