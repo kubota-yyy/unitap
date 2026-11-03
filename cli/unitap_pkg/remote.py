@@ -682,7 +682,8 @@ def pull_paths(layout: dict, target: str, root: str, rels: list[str]) -> tuple[l
 
 def _mirror_paths_in(text: str, root: str) -> list[str]:
     found = []
-    for match in re.finditer(re.escape(root) + r"(/[^\s\"'<>|,;\]\)\}]*)", text):
+    # JSON 文字列の中の改行は "\n"（バックスラッシュ + n）で届くので、バックスラッシュでもパスを切る
+    for match in re.finditer(re.escape(root) + r"(/[^\s\"'<>|,;\]\)\}\\]*)", text):
         rel = match.group(1).rstrip(".:")
         if rel not in found:
             found.append(rel)
