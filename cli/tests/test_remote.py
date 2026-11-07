@@ -230,6 +230,12 @@ class DecideTests(unittest.TestCase):
              patch.object(remote, "probe_hosts", return_value=probes):
             self.assertIsNone(remote.decide(self.args(), self.project))
 
+    def test_device_commands_stay_with_the_device_even_with_a_placement(self):
+        remote.save_placement("claude:abc", self.project, {"host": "big", "label": "m1", "root": "/r/m1"})
+        with patch.object(remote, "local_has_room", side_effect=AssertionError("must not decide")):
+            self.assertIsNone(remote.decide(self.args("device_agent_ios_observe"), self.project))
+        self.assertEqual("big", remote.decide(self.args("status"), self.project)["host"])
+
     def test_local_only_and_unknown_host(self):
         self.assertIsNone(remote.decide(self.args("hosts", host="big"), self.project))
         with self.assertRaises(remote.RemoteError):

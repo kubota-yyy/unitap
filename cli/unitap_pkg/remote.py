@@ -45,6 +45,9 @@ EDITOR_STATE_DIRS = {"Library", "Temp", "Logs", "obj", "UserSettings", "Packages
 
 # Never forwarded: they manage placement or this Mac's own records.
 LOCAL_ONLY_COMMANDS = {"hosts", "remote", "clone", "test_runs", "commands", "describe"}
+# Never forwarded either: they talk to a phone or tablet plugged into this Mac (project extensions such as
+# RWD's device_agent_ios_*), which the mirror's Mac cannot see.
+LOCAL_ONLY_PREFIXES = ("device_agent_",)
 # Without a placement these run here; they never start new Unity work, so they never pick a host.
 NO_PLACEMENT_COMMANDS = {
     "editors", "doctor", "lease", "heartbeat", "status", "quit", "stop", "cancel", "read_console", "clear_console",
@@ -489,7 +492,7 @@ def local_has_room(project: Path) -> tuple[bool, str]:
 def decide(args, project: Path) -> dict | None:
     """The placement to forward this command to, or None to run it here."""
     command = getattr(args, "command", None)
-    if command in LOCAL_ONLY_COMMANDS:
+    if command in LOCAL_ONLY_COMMANDS or (command or "").startswith(LOCAL_ONLY_PREFIXES):
         return None
     hosts = load_hosts()
     local = local_host_name()
