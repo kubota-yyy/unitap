@@ -558,7 +558,9 @@ def remove_clone(src: Path, target: Path, *, force: bool = False) -> dict:
 
     if marker.get("mode") == "worktree" and git_root is not None:
         source_repo = _git_toplevel(src)
-        cmd = ["git", "-C", str(source_repo), "worktree", "remove", "--force", str(git_root)]
+        # Submodule cleanliness is already verified above by _nested_repo_problems();
+        # git requires double --force to remove a worktree that contains submodules.
+        cmd = ["git", "-C", str(source_repo), "worktree", "remove", "--force", "--force", str(git_root)]
         result = _run(cmd)
         if result.returncode != 0:
             raise RuntimeError(f"git worktree remove failed: {result.stderr.strip()}")
