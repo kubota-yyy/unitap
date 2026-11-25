@@ -29,6 +29,7 @@ _SESSION_ENV_KEYS = (
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CODEX_THREAD_ID", "codex"),
     ("CODEX_SESSION_ID", "codex"),
+    ("ANTIGRAVITY_CONVERSATION_ID", "agy"),
     ("STARSESSION_SESSION_ID", "starsession"),
 )
 

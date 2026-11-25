@@ -108,7 +108,7 @@ unitap --json test_runs summary --all-projects
 
 同じプロジェクトを複数セッションが使う場合は、次のどちらかを選ぶ。
 
-**順番に使う（lease）**: 一連の Editor 操作（play → 操作 → capture → stop 等）の前に占有を宣言する。lease 中は他セッションの排他コマンド（play / stop / compile_check / launch / tool_exec の入力操作など）が待機し、`--no-wait-lock` では `editor_leased` で失敗する。状態参照（status / read_console / heartbeat / ui_pointer status）は妨げない。所有者は `UNITAP_SESSION`、未設定なら Claude Code / Codex のセッション ID で識別する。
+**順番に使う（lease）**: 一連の Editor 操作（play → 操作 → capture → stop 等）の前に占有を宣言する。lease 中は他セッションの排他コマンド（play / stop / compile_check / launch / tool_exec の入力操作など）が待機し、`--no-wait-lock` では `editor_leased` で失敗する。状態参照（status / read_console / heartbeat / ui_pointer status）は妨げない。所有者は `UNITAP_SESSION`、未設定なら Claude Code / Codex / AGY（`ANTIGRAVITY_CONVERSATION_ID`） / StarSession のセッション ID で識別する。
 
 ```sh
 unitap --json lease acquire --ttl 1800 --note "PlayMode QA: shop"
@@ -141,7 +141,7 @@ gitignore 済みで Unity が必要とするファイル（SDK・symlink 等）�
 
 1台の Editor 枠（上の上限）が埋まっている時は、別の Mac（プール）で同じ作業を続ける。プールは `~/.unitap/hosts.json`（`UNITAP_HOSTS_FILE` で変更）に書く。各ホストは `ssh`（`user@host.local`、鍵でパスワードなし）、任意で `maxEditors`・`priority`（大きいほど優先）・`reserved`（`[{"from":"23:00","to":"07:30","why":"..."}]` の時間帯は新しく振り分けない）・`interactive`（人が画面を使う Mac。使用中は後回しにし、Editor を前面に出さない。`avoidWhenActive: true` なら使用中は使わない）・`disabled`。
 
-- **既定の動き**: hosts.json があり Claude Code / Codex のセッション内（`CLAUDE_CODE_SESSION_ID` 等がある）なら `--host auto` と同じ。Unity の作業を始めるコマンド（`launch`・`compile_check`・`execute_menu` など）は、この Mac で対象プロジェクトの Editor が動いていれば（他セッションの lease 中を除く）、または空き枠とメモリ 20% 以上があればこの Mac で動く。どちらも無い時だけ、空き枠・メモリ・優先度・人の使用・暖まった複製の有無で選んだ Mac へ回す。どこも空いていなければこの Mac で従来どおり枠を待つ。
+- **既定の動き**: hosts.json があり Claude Code / Codex / AGY / StarSession のセッション内（`CLAUDE_CODE_SESSION_ID`・`CODEX_THREAD_ID`・`ANTIGRAVITY_CONVERSATION_ID` 等がある）なら `--host auto` と同じ。Unity の作業を始めるコマンド（`launch`・`compile_check`・`execute_menu` など）は、この Mac で対象プロジェクトの Editor が動いていれば（他セッションの lease 中を除く）、または空き枠とメモリ 20% 以上があればこの Mac で動く。どちらも無い時だけ、空き枠・メモリ・優先度・人の使用・暖まった複製の有無で選んだ Mac へ回す。どこも空いていなければこの Mac で従来どおり枠を待つ。
 - **決まった場所は続くコマンドにも効く**: 回した先はエージェントのセッション×プロジェクトごとに `~/.unitap/remote-placements.json` へ記録され、以後のコマンド（`status`・`wait_result`・`quit`・`lease`・`editors` を含む）は `--host` を付けなくても同じ Editor へ届く（12時間使わなければ失効）。この Mac で動かしたい時だけ `--host local`（または `UNITAP_HOST=local`）。特定の Mac は `--host eipoc` のように名前で指定する。
 - **作業ツリーの写し**: 回した先には `~/.unitap/remote/<key>/<label>/` に複製（mirror）を1セッション1つ持つ。プロジェクトを読むコマンドの前に毎回、未コミット・未追跡を含む作業ツリーを rsync する（Library・Temp・Logs・obj・.tmp・Build・IOS_Distribution*・.git は送らない。UserSettings は複製を作る時に一度だけ写し、以後は複製の Editor のものを残す）。共通の親の中を絶対パスで指す symlink（RWD の MasterDB → rwd-master など）は rsync から外し、複製の中の同じ場所を指すよう一度だけ張り替えて以後は触らない（毎回張り替えると、その間に動いている Editor が「Opening file failed」で止まるため）。
 - **置き忘れの Editor**: 写しの持ち主のセッションが2時間 unitap を使っていない（`release` を忘れた）写しの Editor は、`remote reap` が閉じる。写しの中で unitap のコマンドがまだ動いていれば閉じない。cypher の launchd（`com.nilone.unitap.reap`）が30分ごとに `~/.agent-rules/unitap/reap-pool.py` で全 Mac へ流す（launchd は外付けボリュームの checkout を読めないことがあるため、unitap が `~/.unitap/remote_helper.py` に最新の helper を置き、それを送る）。`--dry-run` で対象だけ見られる。`file:` 参照のパッケージがプロジェクトの外にあれば、共通の親から同じ相対配置で送る。初回はプロジェクトと Library を送るので数分かかり、2つ目以降の複製は既存の複製から APFS clone で作る。プロジェクト直下の `unitap-remote.json` で `sync`（追加で送るパス。プロジェクトからの相対）と `exclude`（rsync の除外パターン）を足せる。`shared` は共通の親の隣にあり全 clone で共有するフォルダ（RWD の `../rwd-remote-asset`）で、各 Mac の `~/.unitap/remote/<key>/<名前>`（写しの隣）へ、中身が変わった時だけ送る。`only` で送る子フォルダを絞り、その中の `{version}` は `versionFrom`（プロジェクト内ファイルへの正規表現。`slug: true` で英数字以外を `-` に）から決まる。手元に無ければ `ERROR shared folder missing` を出す。

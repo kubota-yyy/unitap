@@ -187,7 +187,7 @@ class DecideTests(unittest.TestCase):
         self.home = Path(stack.enter_context(tempfile.TemporaryDirectory()))
         stack.enter_context(patch.object(Path, "home", return_value=self.home))
         stack.enter_context(patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "abc"}, clear=False))
-        for key in ("UNITAP_HOST", "CODEX_THREAD_ID", "UNITAP_SESSION"):
+        for key in ("UNITAP_HOST", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "ANTIGRAVITY_CONVERSATION_ID", "UNITAP_SESSION"):
             os.environ.pop(key, None)
         hosts = self.home / "hosts.json"
         hosts.write_text(json.dumps({"hosts": {"me": {}, "big": {"ssh": "u@big"}, "small": {"ssh": "u@small"}}}))
@@ -202,8 +202,20 @@ class DecideTests(unittest.TestCase):
 
     def test_no_agent_session_stays_local(self):
         os.environ.pop("CLAUDE_CODE_SESSION_ID")
+        os.environ.pop("ANTIGRAVITY_CONVERSATION_ID", None)
         os.environ.pop("STARSESSION_SESSION_ID", None)
         self.assertIsNone(remote.decide(self.args(), self.project))
+
+    def test_antigravity_session_detected_and_preferred_over_starsession(self):
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        with patch.dict(os.environ, {"ANTIGRAVITY_CONVERSATION_ID": "conv-42", "STARSESSION_SESSION_ID": "ss-9"}):
+            self.assertTrue(remote.agent_session_present())
+            self.assertEqual("agy:conv-42", remote.placement_session())
+            probes = {"big": probe(free_slots=4), "small": probe(free_slots=1)}
+            with patch.object(remote, "local_has_room", return_value=(False, "full")), \
+                 patch.object(remote, "probe_hosts", return_value=probes):
+                placement = remote.decide(self.args(), self.project)
+            self.assertEqual("agy:conv-42", placement["session"])
 
     def test_local_room_stays_local(self):
         with patch.object(remote, "local_has_room", return_value=(True, "free")):

@@ -289,6 +289,11 @@ class LeaseTests(unittest.TestCase):
         self.assertEqual("x", lease.resolve_session_owner({"UNITAP_SESSION": "x", "CLAUDE_CODE_SESSION_ID": "c"}))
         self.assertEqual("claude:c", lease.resolve_session_owner({"CLAUDE_CODE_SESSION_ID": "c"}))
         self.assertEqual("codex:t", lease.resolve_session_owner({"CODEX_THREAD_ID": "t"}))
+        self.assertEqual(
+            "agy:conv-1",
+            lease.resolve_session_owner({"ANTIGRAVITY_CONVERSATION_ID": "conv-1", "STARSESSION_SESSION_ID": "ss-1"}),
+        )
+        self.assertEqual("starsession:ss-1", lease.resolve_session_owner({"STARSESSION_SESSION_ID": "ss-1"}))
         self.assertIsNone(lease.resolve_session_owner({}))
 
 
@@ -417,6 +422,25 @@ class CloneTests(unittest.TestCase):
                 self.assertEqual("db", (cloned / "Library" / "ArtifactDB").read_text())
                 self.assertFalse((cloned / "Library" / "Unitap" / ".heartbeat.json").exists())
                 self.assertEqual([str(cloned)], [c["projectPath"] for c in clone.list_clones(project)])
+                self.assertEqual([], clone.list_untracked_worktrees(project))
+
+                # Add a manual git worktree outside unitap clone; it should appear in untrackedWorktrees.
+                manual_wt = tmp / "repo--manual"
+                subprocess.run(
+                    ["git", "-C", str(repo), "worktree", "add", "--detach", str(manual_wt)],
+                    check=True,
+                    capture_output=True,
+                )
+                try:
+                    untracked = clone.list_untracked_worktrees(project)
+                    self.assertEqual([str(manual_wt / "game")], [u["projectPath"] for u in untracked])
+                    self.assertTrue(untracked[0]["detached"])
+                finally:
+                    subprocess.run(
+                        ["git", "-C", str(repo), "worktree", "remove", "--force", str(manual_wt)],
+                        check=True,
+                        capture_output=True,
+                    )
 
                 with self.assertRaises(RuntimeError):
                     clone.remove_clone(project, cloned)  # uncommitted change in clone

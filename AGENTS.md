@@ -1,6 +1,6 @@
-# Unitap を扱う Codex / エージェントへ
+# Unitap を扱うエージェント（Codex / Claude Code / AGY）へ
 
-- Unity 操作には対象プロジェクトの Unitap ラッパーを優先する。この checkout の dogma では `../scripts/unitap`。別の Editor を操作しない。
+- Unity 操作には対象プロジェクトの Unitap ラッパー（通常はリポジトリ直下の `scripts/unitap`、submodule 側 `unitap/` からは `../scripts/unitap`）を優先する。別の Editor を操作しない。
 - 最初に `unitap --json commands`、接続後に `unitap --json commands --live --search <用途>` で実際に利用できる機能を調べる。`unitap` はプロジェクトのラッパーまたは `python3 /path/to/unitap/cli/unitap.py --project /path/to/UnityProject` を意味する。
 - `unitap --json describe <一覧のid>` で引数・既定値・返却型を確認してから使う。詳細な操作手順・失敗時の扱いは [docs/agent-guide.md](docs/agent-guide.md)。
 - UniCLI の操作も `unitap exec` / `unitap eval` / `unitap unicli` を通す。既存のロック、プロジェクト指定、履歴を迂回しない。

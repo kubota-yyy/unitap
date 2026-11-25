@@ -477,6 +477,56 @@ def list_clones(src: Path) -> list[dict]:
     return clones
 
 
+def list_untracked_worktrees(src: Path, known_clones: list[dict] | None = None) -> list[dict]:
+    """List git worktrees of src's repository that are not tracked as unitap clones."""
+    src = src.resolve()
+    repo_root = _git_toplevel(src)
+    if repo_root is None:
+        return []
+    repo_root = repo_root.resolve()
+    rel = src.relative_to(repo_root)
+    if known_clones is None:
+        known_clones = list_clones(src)
+    tracked_roots = {repo_root}
+    for c in known_clones:
+        if c.get("gitRoot"):
+            tracked_roots.add(Path(c["gitRoot"]).resolve())
+        if c.get("projectPath"):
+            tracked_roots.add(Path(c["projectPath"]).resolve())
+
+    result = _run(["git", "-C", str(repo_root), "worktree", "list", "--porcelain"])
+    if result.returncode != 0:
+        return []
+
+    untracked: list[dict] = []
+    current: dict = {}
+    for raw in result.stdout.splitlines() + [""]:
+        line = raw.strip()
+        if not line:
+            wt = current.get("worktree")
+            if wt:
+                wt_path = Path(wt).resolve()
+                proj_path = (wt_path / rel).resolve() if rel != Path() else wt_path
+                if wt_path not in tracked_roots and proj_path not in tracked_roots:
+                    untracked.append({
+                        "gitRoot": str(wt_path),
+                        "projectPath": str(proj_path),
+                        "branch": current.get("branch"),
+                        "detached": bool(current.get("detached")),
+                        "running": bool(list_unity_processes(proj_path)) if proj_path.exists() else False,
+                    })
+            current = {}
+            continue
+        if line.startswith("worktree "):
+            current["worktree"] = line[len("worktree "):].strip()
+        elif line.startswith("branch "):
+            ref = line[len("branch "):].strip()
+            current["branch"] = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+        elif line == "detached":
+            current["detached"] = True
+    return untracked
+
+
 def remove_clone(src: Path, target: Path, *, force: bool = False) -> dict:
     src = src.resolve()
     target = target.resolve()
@@ -527,7 +577,12 @@ def do_clone(args, _port=None) -> None:
 
     try:
         if args.action == "list":
-            result = {"source": str(project.resolve()), "clones": list_clones(project)}
+            clones = list_clones(project)
+            result = {
+                "source": str(project.resolve()),
+                "clones": clones,
+                "untrackedWorktrees": list_untracked_worktrees(project, known_clones=clones),
+            }
         elif args.action == "remove":
             if not args.dest:
                 raise ValueError("clone remove requires --dest <clone project path>")
